@@ -1,0 +1,669 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using UnityEngine.SceneManagement;
+
+namespace Poker
+{
+    /// <summary>
+    /// Top-down Texas Hold'em: 1 human vs 4 AI bots. Builds the whole table, cards and UI
+    /// from code at runtime, then runs the hand loop. Auto-spawned in the "game" scene.
+    /// </summary>
+    public sealed class PokerGame : MonoBehaviour
+    {
+        // --- config ---
+        const int NumPlayers = 5;
+        const int StartingChips = 1000;
+        const int SmallBlind = 5;
+        const int BigBlind = 10;
+
+        static readonly string[] BotNames = { "You", "Jett", "Mira", "Cole", "Vega" };
+
+        [Header("Scene wiring (optional — left empty, falls back to find-by-name then defaults)")]
+        [Tooltip("Your human player node (the \"Me\" object).")]
+        [SerializeField] Transform humanSeat;
+        [Tooltip("The four bot nodes, in order P1, P2, P3, P4.")]
+        [SerializeField] Transform[] botSeats = new Transform[4];
+
+        [Header("Options")]
+        [Tooltip("Draw the procedural oval felt. Uncheck if your BG sprite already shows a table.")]
+        [SerializeField] bool buildTableFelt = true;
+        [Tooltip("Put the pot / community cards at the average of the seat positions.")]
+        [SerializeField] bool autoCenterFromSeats = true;
+        [Tooltip("Used only when Auto Center is off.")]
+        [SerializeField] Vector2 tableCenter = new Vector2(0f, 0.3f);
+
+        sealed class SeatVisual
+        {
+            public int Seat;
+            public Vector3 Anchor;
+            public Vector3 Dir;            // toward table centre
+            public Vector3[] HolePos = new Vector3[2];
+            public float HoleScale;
+            public bool FaceUp;            // human shows cards
+            public Transform Avatar;
+            public CardView[] Hole = new CardView[2];
+            public Text Info;
+            public Text Bet;
+            public Vector3 InfoWorld;
+            public Vector3 BetWorld;
+            public string ActionText = "";
+        }
+
+        Camera _cam;
+        PokerArt _art;
+        PokerEngine _engine;
+        BotBrain[] _brains;
+        SeatVisual[] _seats;
+        Transform _tableRoot;
+        SpriteRenderer _dealerDisc;
+        SpriteRenderer _potChip;
+
+        readonly List<CardView> _board = new List<CardView>(5);
+        Sprite _backSprite;
+        System.Random _rng;
+
+        // UI
+        RectTransform _canvasRect;
+        Text _potText, _statusText, _foldLabel, _callLabel, _raiseLabel, _raiseValueText;
+        Button _foldBtn, _callBtn, _raiseBtn;
+        Slider _raiseSlider;
+        GameObject _actionPanel;
+
+        readonly List<(RectTransform rt, Vector3 world)> _worldLabels = new List<(RectTransform, Vector3)>();
+
+        // human input state
+        bool _awaitingHuman, _actionReady;
+        PlayerAction _pending;
+        LegalActions _currentLegal;
+        SeatPlayer _human;
+
+        Vector3 _tableCenter = new Vector3(0f, 0.3f, 0f);
+
+        static readonly Vector3[] DefaultAnchors =
+        {
+            new Vector3(0f, -3.3f, 0f),
+            new Vector3(5.0f, -1.7f, 0f),
+            new Vector3(3.4f, 2.9f, 0f),
+            new Vector3(-3.4f, 2.9f, 0f),
+            new Vector3(-5.0f, -1.7f, 0f),
+        };
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
+        static void AutoBoot()
+        {
+            if (SceneManager.GetActiveScene().name != "game") return;
+            if (FindFirstObjectByType<PokerGame>() != null) return;
+            new GameObject("PokerGame").AddComponent<PokerGame>();
+        }
+
+        void Start()
+        {
+            _rng = new System.Random();
+            _art = new PokerArt();
+            _art.Load();
+            if (!_art.Loaded)
+                Debug.LogError("[PokerGame] Card art failed to load from Resources/Poker.");
+            _backSprite = _art.Back(false);
+
+            SetupCamera();
+            BuildSeats();
+            BuildTable();
+            BuildEngine();
+            BuildUI();
+            StartCoroutine(RunGame());
+        }
+
+        // ---------------- scene build ----------------
+
+        void SetupCamera()
+        {
+            _cam = Camera.main;
+            if (_cam == null)
+            {
+                var go = new GameObject("Main Camera", typeof(Camera));
+                go.tag = "MainCamera";
+                go.transform.position = new Vector3(0, 0, -10);
+                _cam = go.GetComponent<Camera>();
+            }
+            _cam.orthographic = true;
+            _cam.orthographicSize = 5.7f;
+            _cam.clearFlags = CameraClearFlags.SolidColor;
+            _cam.backgroundColor = new Color(0.05f, 0.16f, 0.10f, 1f);
+        }
+
+        void BuildTable()
+        {
+            _tableRoot = new GameObject("TableRoot").transform;
+            _tableRoot.position = Vector3.zero;
+
+            if (buildTableFelt)
+            {
+                var felt = new GameObject("FeltTable");
+                felt.transform.SetParent(_tableRoot, false);
+                felt.transform.position = _tableCenter + new Vector3(0f, -0.1f, 0f);
+                var sr = felt.AddComponent<SpriteRenderer>();
+                sr.sprite = PokerUi.MakeTableSprite();
+                sr.sortingOrder = 1;
+            }
+
+            // pot chip flair at table centre
+            var chip = new GameObject("PotChip");
+            chip.transform.SetParent(_tableRoot, false);
+            chip.transform.position = _tableCenter + new Vector3(0f, -0.8f, 0f);
+            chip.transform.localScale = Vector3.one * 0.55f;
+            _potChip = chip.AddComponent<SpriteRenderer>();
+            _potChip.sprite = _art.Chip(1);
+            _potChip.sortingOrder = 5;
+            _potChip.enabled = false;
+
+            var disc = new GameObject("DealerButton");
+            disc.transform.SetParent(_tableRoot, false);
+            disc.transform.localScale = Vector3.one * 0.4f;
+            _dealerDisc = disc.AddComponent<SpriteRenderer>();
+            _dealerDisc.sprite = PokerUi.MakeDiscSprite();
+            _dealerDisc.sortingOrder = 4;
+            _dealerDisc.enabled = false;
+        }
+
+        void BuildSeats()
+        {
+            // Resolve the five seat transforms (index 0 = human "Me", 1..4 = bots P1..P4).
+            // Priority: Inspector reference → find-by-name in the scene → a generated fallback.
+            var t = new Transform[NumPlayers];
+            t[0] = humanSeat != null ? humanSeat : FindOrCreate("Me", DefaultAnchors[0]);
+            for (int i = 1; i < NumPlayers; i++)
+            {
+                Transform assigned = (botSeats != null && i - 1 < botSeats.Length) ? botSeats[i - 1] : null;
+                t[i] = assigned != null ? assigned : FindOrCreate("P" + i, DefaultAnchors[i]);
+            }
+
+            // Table centre = where the pot / community cards sit.
+            if (autoCenterFromSeats)
+            {
+                Vector3 sum = Vector3.zero;
+                foreach (var tr in t) sum += tr.position;
+                _tableCenter = sum / NumPlayers;
+                _tableCenter.z = 0f;
+            }
+            else
+            {
+                _tableCenter = new Vector3(tableCenter.x, tableCenter.y, 0f);
+            }
+
+            _seats = new SeatVisual[NumPlayers];
+            for (int i = 0; i < NumPlayers; i++)
+                _seats[i] = MakeSeat(i, t[i], i == 0);
+        }
+
+        // Build a seat's layout from its node, deriving card/label spots relative to the centre.
+        SeatVisual MakeSeat(int index, Transform node, bool human)
+        {
+            var s = new SeatVisual { Seat = index, Avatar = node };
+            s.Anchor = node.position; s.Anchor.z = 0f;
+
+            Vector3 dir = _tableCenter - s.Anchor;
+            s.Dir = dir.sqrMagnitude < 0.0001f ? Vector3.up : dir.normalized;
+            Vector3 perp = new Vector3(-s.Dir.y, s.Dir.x, 0f);
+
+            if (human)
+            {
+                s.FaceUp = true;
+                s.HoleScale = 0.9f;
+                Vector3 hc = s.Anchor + s.Dir * 1.15f;
+                s.HolePos[0] = hc - perp * 0.5f;
+                s.HolePos[1] = hc + perp * 0.5f;
+                s.InfoWorld = s.Anchor - s.Dir * 1.15f;
+                s.BetWorld = s.Anchor + s.Dir * 2.0f;
+            }
+            else
+            {
+                s.FaceUp = false;
+                s.HoleScale = 0.5f;
+                Vector3 hc = s.Anchor + s.Dir * 0.85f;
+                s.HolePos[0] = hc - perp * 0.16f;
+                s.HolePos[1] = hc + perp * 0.16f;
+                s.InfoWorld = s.Anchor - s.Dir * 1.2f;
+                s.BetWorld = s.Anchor + s.Dir * 1.7f;
+            }
+            return s;
+        }
+
+        static Transform FindOrCreate(string name, Vector3 fallback)
+        {
+            var go = GameObject.Find(name);
+            if (go != null) return go.transform;
+            var created = new GameObject("Seat_" + name);
+            created.transform.position = fallback;
+            return created.transform;
+        }
+
+        void BuildEngine()
+        {
+            _engine = new PokerEngine(_rng) { SmallBlind = SmallBlind, BigBlind = BigBlind };
+            _brains = new BotBrain[NumPlayers];
+            for (int i = 0; i < NumPlayers; i++)
+            {
+                var p = new SeatPlayer
+                {
+                    Seat = i,
+                    Name = BotNames[i % BotNames.Length],
+                    IsHuman = (i == 0),
+                    Chips = StartingChips
+                };
+                _engine.Players.Add(p);
+                if (i != 0) _brains[i] = BotBrain.CreateRandom(_rng);
+            }
+            _human = _engine.Players[0];
+            _engine.ButtonIndex = NumPlayers - 1; // so first hand's button moves to seat 0
+        }
+
+        // ---------------- UI ----------------
+
+        void BuildUI()
+        {
+            PokerUi.CreateOverlayCanvas(out _canvasRect);
+
+            _statusText = PokerUi.Label(_canvasRect, "Status", new Vector2(0, 330), new Vector2(1400, 80),
+                52, TextAnchor.MiddleCenter, new Color(1f, 0.93f, 0.6f));
+            _statusText.fontStyle = FontStyle.Bold;
+
+            _potText = PokerUi.Label(_canvasRect, "Pot", new Vector2(0, 150), new Vector2(600, 60),
+                40, TextAnchor.MiddleCenter, Color.white);
+            _potText.fontStyle = FontStyle.Bold;
+            _worldLabels.Add(((RectTransform)_potText.transform, _tableCenter + new Vector3(0f, 1.7f, 0f)));
+
+            // Action panel (bottom-right).
+            _actionPanel = PokerUi.NewRect(_canvasRect, "ActionPanel", new Vector2(680, -360), new Vector2(560, 240)).gameObject;
+            var panelRt = (RectTransform)_actionPanel.transform;
+
+            _raiseValueText = PokerUi.Label(panelRt, "RaiseValue", new Vector2(70, 78), new Vector2(360, 40),
+                28, TextAnchor.MiddleCenter, new Color(1f, 0.9f, 0.55f));
+            _raiseSlider = PokerUi.HSlider(panelRt, new Vector2(70, 36), new Vector2(360, 22));
+            _raiseSlider.onValueChanged.AddListener(_ => UpdateRaiseValueText());
+
+            _foldBtn = PokerUi.Btn(panelRt, "Fold", new Vector2(-110, -50), new Vector2(150, 76),
+                "FOLD", new Color(0.70f, 0.23f, 0.23f), out _foldLabel);
+            _callBtn = PokerUi.Btn(panelRt, "Call", new Vector2(60, -50), new Vector2(150, 76),
+                "CALL", new Color(0.18f, 0.55f, 0.30f), out _callLabel);
+            _raiseBtn = PokerUi.Btn(panelRt, "Raise", new Vector2(230, -50), new Vector2(150, 76),
+                "RAISE", new Color(0.78f, 0.56f, 0.16f), out _raiseLabel);
+
+            _foldBtn.onClick.AddListener(OnFoldClicked);
+            _callBtn.onClick.AddListener(OnCallClicked);
+            _raiseBtn.onClick.AddListener(OnRaiseClicked);
+            _actionPanel.SetActive(false);
+
+            // Per-seat info + bet labels (positioned over the world each frame).
+            foreach (var s in _seats)
+            {
+                s.Info = PokerUi.Label(_canvasRect, "Info" + s.Seat, Vector2.zero, new Vector2(260, 110),
+                    26, TextAnchor.MiddleCenter, Color.white);
+                s.Info.fontStyle = FontStyle.Bold;
+                s.Bet = PokerUi.Label(_canvasRect, "Bet" + s.Seat, Vector2.zero, new Vector2(180, 40),
+                    26, TextAnchor.MiddleCenter, new Color(1f, 0.9f, 0.55f));
+                _worldLabels.Add(((RectTransform)s.Info.transform, s.InfoWorld));
+                _worldLabels.Add(((RectTransform)s.Bet.transform, s.BetWorld));
+            }
+        }
+
+        void LateUpdate()
+        {
+            if (_cam == null || _canvasRect == null) return;
+            foreach (var (rt, world) in _worldLabels)
+            {
+                Vector3 sp = _cam.WorldToScreenPoint(world);
+                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, sp, null, out var local))
+                    rt.anchoredPosition = local;
+            }
+        }
+
+        void UpdateRaiseValueText()
+        {
+            if (_raiseValueText != null && _raiseSlider != null)
+                _raiseValueText.text = $"Raise to  ${(int)_raiseSlider.value}";
+        }
+
+        void OnFoldClicked() { if (_awaitingHuman) { _pending = PlayerAction.Fold(); _actionReady = true; } }
+        void OnCallClicked()
+        {
+            if (!_awaitingHuman) return;
+            _pending = _currentLegal.CanCheck ? PlayerAction.Check() : PlayerAction.Call();
+            _actionReady = true;
+        }
+        void OnRaiseClicked()
+        {
+            if (!_awaitingHuman || !_currentLegal.CanRaise) return;
+            _pending = PlayerAction.RaiseTo((int)_raiseSlider.value);
+            _actionReady = true;
+        }
+
+        // ---------------- game loop ----------------
+
+        IEnumerator RunGame()
+        {
+            yield return new WaitForSeconds(0.4f);
+            while (true)
+            {
+                if (!_engine.CanStartHand)
+                {
+                    foreach (var p in _engine.Players) p.Chips = StartingChips;
+                    SetStatus("New game — everyone re-bought");
+                    RefreshSeatInfo();
+                    yield return new WaitForSeconds(1.6f);
+                }
+                yield return PlayHand();
+                yield return new WaitForSeconds(1.5f);
+            }
+        }
+
+        IEnumerator PlayHand()
+        {
+            ClearTableVisuals();
+            _engine.StartHand();
+            PlaceDealerButton();
+            SetStatus("");
+            RefreshSeatInfo();
+            RefreshPotAndBets();
+
+            yield return DealHoleCards();
+            HighlightActing(_engine.ActingPlayer);
+
+            bool revealedRunout = false;
+
+            while (!_engine.HandOver)
+            {
+                if (_engine.NeedsAction)
+                {
+                    var p = _engine.ActingPlayer;
+                    HighlightActing(p);
+                    PlayerAction action;
+                    if (p.IsHuman)
+                    {
+                        yield return GetHumanAction();
+                        action = _pending;
+                    }
+                    else
+                    {
+                        yield return new WaitForSeconds(0.5f + (float)_rng.NextDouble() * 0.6f);
+                        action = _brains[p.Seat].Decide(_engine, p);
+                    }
+
+                    _engine.SubmitAction(action);
+                    SetSeatAction(p, action);
+                    RefreshSeatInfo();
+                    RefreshPotAndBets();
+                    HighlightActing(_engine.NeedsAction ? _engine.ActingPlayer : null);
+                    yield return new WaitForSeconds(0.25f);
+                }
+                else
+                {
+                    // Betting round complete → next street.
+                    foreach (var s in _seats)
+                        if (!_engine.Players[s.Seat].Folded) s.ActionText = "";
+                    yield return new WaitForSeconds(0.25f);
+
+                    _engine.AdvanceStreet();
+
+                    // If players are all-in, expose their cards before running the board out.
+                    if (!revealedRunout && _engine.ActiveCount > 1 && !_engine.NeedsAction && !_engine.HandOver)
+                    {
+                        revealedRunout = true;
+                        yield return RevealActiveHoles();
+                    }
+
+                    yield return RevealBoardForStreet();
+                    RefreshPotAndBets();
+                    if (_engine.Street != Street.Showdown)
+                        SetStatus(StreetName(_engine.Street));
+                    yield return new WaitForSeconds(0.5f);
+                }
+            }
+
+            yield return Showdown();
+        }
+
+        IEnumerator GetHumanAction()
+        {
+            _currentLegal = _engine.GetLegalActions();
+            ConfigureActionPanel(_currentLegal);
+            _actionPanel.SetActive(true);
+            _actionReady = false;
+            _awaitingHuman = true;
+            SetStatus("Your move");
+            yield return new WaitUntil(() => _actionReady);
+            _awaitingHuman = false;
+            _actionPanel.SetActive(false);
+            SetStatus("");
+        }
+
+        void ConfigureActionPanel(LegalActions legal)
+        {
+            _foldBtn.interactable = true;
+            _callBtn.interactable = true;
+
+            if (legal.CanCheck)
+                _callLabel.text = "CHECK";
+            else if (legal.ToCall >= _human.Chips)
+                _callLabel.text = $"CALL ${legal.ToCall}\n(ALL IN)";
+            else
+                _callLabel.text = $"CALL ${legal.ToCall}";
+
+            if (legal.CanRaise)
+            {
+                bool allInOnly = legal.MinRaiseTo >= legal.MaxRaiseTo;
+                _raiseBtn.interactable = true;
+                _raiseSlider.gameObject.SetActive(!allInOnly);
+                _raiseSlider.minValue = legal.MinRaiseTo;
+                _raiseSlider.maxValue = legal.MaxRaiseTo;
+                _raiseSlider.value = legal.MinRaiseTo;
+                if (allInOnly)
+                {
+                    _raiseLabel.text = "ALL IN";
+                    _raiseValueText.text = $"All in  ${legal.MaxRaiseTo}";
+                }
+                else
+                {
+                    _raiseLabel.text = (legal.CanCheck) ? "BET" : "RAISE";
+                    UpdateRaiseValueText();
+                }
+            }
+            else
+            {
+                _raiseBtn.interactable = false;
+                _raiseSlider.gameObject.SetActive(false);
+                _raiseLabel.text = "RAISE";
+                _raiseValueText.text = "";
+            }
+        }
+
+        // ---------------- showdown ----------------
+
+        IEnumerator Showdown()
+        {
+            bool showdown = _engine.ReachedShowdown;
+            if (showdown)
+                yield return RevealActiveHoles();
+
+            var shares = _engine.FinishHand();
+
+            // Aggregate winnings by player.
+            var totals = new Dictionary<SeatPlayer, int>();
+            var bestValue = new Dictionary<SeatPlayer, HandValue>();
+            foreach (var sh in shares)
+            {
+                totals.TryGetValue(sh.Player, out int cur);
+                totals[sh.Player] = cur + sh.Amount;
+                if (!sh.WonByFold) bestValue[sh.Player] = sh.Value;
+            }
+
+            SeatPlayer primary = null;
+            int bestAmt = -1;
+            foreach (var kv in totals)
+                if (kv.Value > bestAmt) { bestAmt = kv.Value; primary = kv.Key; }
+
+            if (primary != null)
+            {
+                string msg = $"{primary.Name} wins ${bestAmt}";
+                if (showdown && bestValue.TryGetValue(primary, out var hv))
+                    msg += $"\n{hv.Describe()}";
+                if (totals.Count > 1) msg += "  (split)";
+                SetStatus(msg);
+            }
+
+            RefreshSeatInfo();
+            RefreshPotAndBets();
+            yield return new WaitForSeconds(2.4f);
+        }
+
+        IEnumerator RevealActiveHoles()
+        {
+            foreach (var s in _seats)
+            {
+                var p = _engine.Players[s.Seat];
+                if (!p.IsActive || p.IsHuman) continue;
+                for (int k = 0; k < 2; k++)
+                    if (s.Hole[k] != null && !s.Hole[k].FaceUp)
+                        yield return s.Hole[k].FlipTo(true, 0.12f);
+            }
+        }
+
+        // ---------------- card visuals ----------------
+
+        IEnumerator DealHoleCards()
+        {
+            for (int k = 0; k < 2; k++)
+            {
+                foreach (var s in _seats)
+                {
+                    var p = _engine.Players[s.Seat];
+                    if (!p.InHand) continue;
+
+                    var cv = CardView.Create(_tableRoot, _backSprite, s.FaceUp ? 7 : 6);
+                    cv.SetFace(_art.Card(p.Hole[k]));
+                    cv.transform.localScale = Vector3.one * s.HoleScale;
+                    cv.transform.localPosition = _tableCenter;
+                    if (s.FaceUp) cv.ShowFace(true);
+                    s.Hole[k] = cv;
+
+                    StartCoroutine(cv.MoveTo(s.HolePos[k], 0.16f));
+                    yield return new WaitForSeconds(0.06f);
+                }
+            }
+            yield return new WaitForSeconds(0.2f);
+        }
+
+        IEnumerator RevealBoardForStreet()
+        {
+            int have = _board.Count;
+            int total = _engine.Board.Count;
+            for (int i = have; i < total; i++)
+            {
+                var cv = CardView.Create(_tableRoot, _backSprite, 6);
+                cv.SetFace(_art.Card(_engine.Board[i]));
+                cv.transform.localScale = Vector3.one * 0.74f;
+                cv.transform.localPosition = _tableCenter + new Vector3((i - 2) * 0.74f, 0.45f, 0f);
+                _board.Add(cv);
+                yield return cv.FlipTo(true, 0.16f);
+                yield return new WaitForSeconds(0.05f);
+            }
+        }
+
+        void ClearTableVisuals()
+        {
+            foreach (var s in _seats)
+            {
+                for (int k = 0; k < 2; k++)
+                    if (s.Hole[k] != null) { Destroy(s.Hole[k].gameObject); s.Hole[k] = null; }
+                s.ActionText = "";
+                if (s.Bet != null) s.Bet.text = "";
+            }
+            foreach (var cv in _board) if (cv != null) Destroy(cv.gameObject);
+            _board.Clear();
+            if (_potChip != null) _potChip.enabled = false;
+        }
+
+        void PlaceDealerButton()
+        {
+            if (_dealerDisc == null) return;
+            int b = _engine.ButtonIndex;
+            var s = _seats[b];
+            Vector3 perp = new Vector3(-s.Dir.y, s.Dir.x, 0f);
+            _dealerDisc.transform.position = s.Anchor + s.Dir * 0.55f + perp * 0.55f;
+            _dealerDisc.enabled = true;
+        }
+
+        // ---------------- labels ----------------
+
+        void SetStatus(string text) { if (_statusText != null) _statusText.text = text; }
+
+        string StreetName(Street st) => st switch
+        {
+            Street.Flop => "Flop",
+            Street.Turn => "Turn",
+            Street.River => "River",
+            _ => ""
+        };
+
+        void SetSeatAction(SeatPlayer p, PlayerAction action)
+        {
+            string verb = action.Type switch
+            {
+                ActionType.Fold => "Fold",
+                ActionType.Check => "Check",
+                ActionType.Call => p.IsAllIn ? "All in" : $"Call ${p.StreetCommitted}",
+                ActionType.Raise => p.IsAllIn ? $"All in ${p.StreetCommitted}" : $"Raise ${p.StreetCommitted}",
+                _ => ""
+            };
+            _seats[p.Seat].ActionText = verb;
+
+            // Dim a folded player's cards.
+            if (p.Folded)
+            {
+                var s = _seats[p.Seat];
+                for (int k = 0; k < 2; k++)
+                    if (s.Hole[k] != null) s.Hole[k].Color = new Color(1f, 1f, 1f, 0.35f);
+            }
+        }
+
+        void RefreshSeatInfo()
+        {
+            foreach (var s in _seats)
+            {
+                var p = _engine.Players[s.Seat];
+                string line = $"{p.Name}\n${p.Chips}";
+                if (!string.IsNullOrEmpty(s.ActionText)) line += $"\n{s.ActionText}";
+                else if (p.Chips <= 0 && !p.InHand) line += "\nOUT";
+                s.Info.text = line;
+                s.Info.color = p.Folded ? new Color(0.55f, 0.55f, 0.55f) : Color.white;
+            }
+        }
+
+        void RefreshPotAndBets()
+        {
+            int pot = _engine.Pot;
+            if (_potText != null) _potText.text = pot > 0 ? $"POT  ${pot}" : "";
+            if (_potChip != null) _potChip.enabled = pot > 0;
+
+            foreach (var s in _seats)
+            {
+                int bet = _engine.Players[s.Seat].StreetCommitted;
+                s.Bet.text = bet > 0 ? $"${bet}" : "";
+            }
+        }
+
+        void HighlightActing(SeatPlayer acting)
+        {
+            foreach (var s in _seats)
+            {
+                var p = _engine.Players[s.Seat];
+                if (acting != null && p == acting)
+                    s.Info.color = new Color(1f, 0.85f, 0.2f);
+                else
+                    s.Info.color = p.Folded ? new Color(0.55f, 0.55f, 0.55f) : Color.white;
+            }
+        }
+    }
+}
