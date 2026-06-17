@@ -42,6 +42,8 @@ namespace Poker
             public Vector3 Dir;            // toward table centre
             public Vector3[] HolePos = new Vector3[2];
             public float HoleScale;
+            public float RevealScale;      // scale to use when the cards are shown at showdown
+            public Vector3[] RevealPos = new Vector3[2]; // spread-out spots for shown cards
             public bool FaceUp;            // human shows cards
             public Transform Avatar;
             public CardView[] Hole = new CardView[2];
@@ -59,7 +61,9 @@ namespace Poker
         SeatVisual[] _seats;
         Transform _tableRoot;
         SpriteRenderer _dealerDisc;
-        SpriteRenderer _potChip;
+        Transform _dealerCardsRoot;   // community cards parent (the "DealerCards" scene node)
+        Transform _potChipsRoot;      // pot chips parent (the "PotChips" scene node)
+        SpriteRenderer[] _potChips;
 
         readonly List<CardView> _board = new List<CardView>(5);
         Sprite _backSprite;
@@ -149,15 +153,12 @@ namespace Poker
                 sr.sortingOrder = 1;
             }
 
-            // pot chip flair at table centre
-            var chip = new GameObject("PotChip");
-            chip.transform.SetParent(_tableRoot, false);
-            chip.transform.position = _tableCenter + new Vector3(0f, -0.8f, 0f);
-            chip.transform.localScale = Vector3.one * 0.55f;
-            _potChip = chip.AddComponent<SpriteRenderer>();
-            _potChip.sprite = _art.Chip(1);
-            _potChip.sortingOrder = 5;
-            _potChip.enabled = false;
+            // Community cards and pot chips hang off scene nodes you can reposition in the editor.
+            // A node left at the origin is auto-placed at the table centre; a node you've moved is
+            // left where it is, and its cards/chips follow it.
+            _dealerCardsRoot = ResolveAnchor("DealerCards", _tableCenter + new Vector3(0f, 0.45f, 0f));
+            _potChipsRoot = ResolveAnchor("PotChips", _tableCenter + new Vector3(0f, -0.8f, 0f));
+            BuildPotChips();
 
             var disc = new GameObject("DealerButton");
             disc.transform.SetParent(_tableRoot, false);
@@ -166,6 +167,46 @@ namespace Poker
             _dealerDisc.sprite = PokerUi.MakeDiscSprite();
             _dealerDisc.sortingOrder = 4;
             _dealerDisc.enabled = false;
+        }
+
+        // Find a scene node by name (creating it if absent) to use as a parent/anchor.
+        // Auto-places it at the table spot only when it sits at the origin (i.e. untouched).
+        static Transform ResolveAnchor(string name, Vector3 autoPos)
+        {
+            var go = GameObject.Find(name);
+            if (go == null) go = new GameObject(name);
+            if (go.transform.position.sqrMagnitude < 0.0001f)
+                go.transform.position = autoPos;
+            return go.transform;
+        }
+
+        // A small pile of chips parented under the PotChips node; how many show scales with the pot.
+        void BuildPotChips()
+        {
+            int[] colors = { 1, 3, 2, 5, 4, 6 }; // red, blue, green, yellow, black, orange
+            _potChips = new SpriteRenderer[colors.Length];
+            for (int i = 0; i < colors.Length; i++)
+            {
+                var chip = new GameObject("PotChip" + i);
+                chip.transform.SetParent(_potChipsRoot, false);
+                int col = i % 2, row = i / 2;
+                chip.transform.localPosition = new Vector3(col == 0 ? -0.16f : 0.16f, row * 0.07f, 0f);
+                chip.transform.localScale = Vector3.one * 0.5f;
+                var sr = chip.AddComponent<SpriteRenderer>();
+                sr.sprite = _art.Chip(colors[i]);
+                sr.sortingOrder = 5 + i; // higher chips draw on top of the pile
+                sr.enabled = false;
+                _potChips[i] = sr;
+            }
+        }
+
+        // Reveal a chip for every ~60 in the pot (at least one when there's any pot).
+        void ShowPotChips(int pot)
+        {
+            if (_potChips == null) return;
+            int show = pot <= 0 ? 0 : Mathf.Clamp(1 + pot / 60, 1, _potChips.Length);
+            for (int i = 0; i < _potChips.Length; i++)
+                _potChips[i].enabled = i < show;
         }
 
         void BuildSeats()
@@ -211,12 +252,16 @@ namespace Poker
             if (human)
             {
                 s.FaceUp = true;
-                s.HoleScale = 0.9f;
+                s.HoleScale = 1.0f;
                 Vector3 hc = s.Anchor + s.Dir * 1.15f;
                 s.HolePos[0] = hc - perp * 0.5f;
                 s.HolePos[1] = hc + perp * 0.5f;
                 s.InfoWorld = s.Anchor - s.Dir * 1.15f;
                 s.BetWorld = s.Anchor + s.Dir * 2.0f;
+                // Your cards are full size and face-up from the deal — no separate reveal layout.
+                s.RevealScale = s.HoleScale;
+                s.RevealPos[0] = s.HolePos[0];
+                s.RevealPos[1] = s.HolePos[1];
             }
             else
             {
@@ -227,6 +272,10 @@ namespace Poker
                 s.HolePos[1] = hc + perp * 0.16f;
                 s.InfoWorld = s.Anchor - s.Dir * 1.2f;
                 s.BetWorld = s.Anchor + s.Dir * 1.7f;
+                // When shown at showdown, grow to full size and spread apart so both read clearly.
+                s.RevealScale = 1.0f;
+                s.RevealPos[0] = hc - perp * 0.5f;
+                s.RevealPos[1] = hc + perp * 0.5f;
             }
             return s;
         }
@@ -524,9 +573,17 @@ namespace Poker
             {
                 var p = _engine.Players[s.Seat];
                 if (!p.IsActive || p.IsHuman) continue;
+                var parent = s.Avatar != null ? s.Avatar : _tableRoot;
                 for (int k = 0; k < 2; k++)
-                    if (s.Hole[k] != null && !s.Hole[k].FaceUp)
-                        yield return s.Hole[k].FlipTo(true, 0.12f);
+                {
+                    var cv = s.Hole[k];
+                    if (cv == null || cv.FaceUp) continue;
+                    // Grow to full size, spread out, and lift above the table clutter, then flip up.
+                    cv.SortingOrder = 8;
+                    cv.transform.localScale = Vector3.one * s.RevealScale;
+                    StartCoroutine(cv.MoveTo(parent.InverseTransformPoint(s.RevealPos[k]), 0.12f));
+                    yield return cv.FlipTo(true, 0.12f);
+                }
             }
         }
 
@@ -541,14 +598,17 @@ namespace Poker
                     var p = _engine.Players[s.Seat];
                     if (!p.InHand) continue;
 
-                    var cv = CardView.Create(_tableRoot, _backSprite, s.FaceUp ? 7 : 6);
+                    // Hole cards live under their owner's seat node (Me, P1..P4).
+                    var parent = s.Avatar != null ? s.Avatar : _tableRoot;
+                    var cv = CardView.Create(parent, _backSprite, s.FaceUp ? 7 : 6);
                     cv.SetFace(_art.Card(p.Hole[k]));
                     cv.transform.localScale = Vector3.one * s.HoleScale;
-                    cv.transform.localPosition = _tableCenter;
+                    cv.transform.position = _tableCenter;       // deal from the centre…
                     if (s.FaceUp) cv.ShowFace(true);
                     s.Hole[k] = cv;
 
-                    StartCoroutine(cv.MoveTo(s.HolePos[k], 0.16f));
+                    // …then slide out to the seat's hole spot (world pos expressed local to the seat).
+                    StartCoroutine(cv.MoveTo(parent.InverseTransformPoint(s.HolePos[k]), 0.16f));
                     yield return new WaitForSeconds(0.06f);
                 }
             }
@@ -561,10 +621,10 @@ namespace Poker
             int total = _engine.Board.Count;
             for (int i = have; i < total; i++)
             {
-                var cv = CardView.Create(_tableRoot, _backSprite, 6);
+                var cv = CardView.Create(_dealerCardsRoot, _backSprite, 6);
                 cv.SetFace(_art.Card(_engine.Board[i]));
                 cv.transform.localScale = Vector3.one * 0.74f;
-                cv.transform.localPosition = _tableCenter + new Vector3((i - 2) * 0.74f, 0.45f, 0f);
+                cv.transform.localPosition = new Vector3((i - 2) * 0.74f, 0f, 0f); // laid out across the DealerCards node
                 _board.Add(cv);
                 yield return cv.FlipTo(true, 0.16f);
                 yield return new WaitForSeconds(0.05f);
@@ -582,7 +642,7 @@ namespace Poker
             }
             foreach (var cv in _board) if (cv != null) Destroy(cv.gameObject);
             _board.Clear();
-            if (_potChip != null) _potChip.enabled = false;
+            ShowPotChips(0);
         }
 
         void PlaceDealerButton()
@@ -645,7 +705,7 @@ namespace Poker
         {
             int pot = _engine.Pot;
             if (_potText != null) _potText.text = pot > 0 ? $"POT  ${pot}" : "";
-            if (_potChip != null) _potChip.enabled = pot > 0;
+            ShowPotChips(pot);
 
             foreach (var s in _seats)
             {
