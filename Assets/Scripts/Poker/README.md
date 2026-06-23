@@ -37,6 +37,8 @@ controller in the `game` scene. With no Inspector references it finds the nodes 
 | `View/PokerUi.cs` | Runtime UI factory + procedural felt/disc textures |
 | `View/PokerGame.cs` | Bootstrap, table/seat layout, UI, and the hand-by-hand game loop |
 
+
+
 ## Art / Resources
 Six sprite sheets were **copied** (originals untouched) into `Assets/Resources/Poker/` with
 fresh GUIDs so they can be loaded at runtime via `Resources.LoadAll<Sprite>`. If you re-slice
@@ -52,3 +54,15 @@ Edit the constants at the top of `PokerGame.cs`: `NumPlayers`, `StartingChips`,
 - No sound, no betting-history log, no save. Heads-up (2-player) blind order is simplified.
 - The existing `BG` object is left in place behind the felt; delete/hide it if you prefer a
   plain background.
+
+
+# What's on Raven's Mind: 
+
+
+- the core gameloop doens't really care for the player which is 'me' if it wins or loses there's no huge impact upon it. 
+  For which the gamification seems to be a bit dull at the moment. For now, we have the core loop where the game continues until any of the players win (even if the the player is AI/Automated). This can drag the game for quite sometime; which makes the player sit for a long while until that pot has been played properly. At this moment I've no idea what to do w/ the game juice or the game play mechanics to make it more fun and enjoyable for players. Eventually, however, not now I will move the game to online letting other players join. AI's can also join if slots are not met. 
+
+- This game also will be a participating in a gamejam for JuniperDev, a gameDev youtuber. The game Jam know as "VERY SERIOUS GAMEJAM".   
+
+  The theme is spin which already matches as our players take turn in a round table. If i'm wrong than we might need to do something about it so not only we can participate properly also have a shot at winning. 
+

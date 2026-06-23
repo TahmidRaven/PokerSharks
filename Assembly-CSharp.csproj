@@ -52,11 +52,13 @@
     <Compile Include="Assets/Scripts/Poker/View/CardView.cs" />
     <Compile Include="Assets/Scripts/Poker/Game/PokerEngine.cs" />
     <Compile Include="Assets/Scripts/Poker/Core/HandEvaluator.cs" />
+    <Compile Include="Assets/Scripts/Audio/AudioContent.cs" />
     <Compile Include="Assets/Scripts/Poker/View/PokerGame.cs" />
     <Compile Include="Assets/Scripts/Poker/Game/BotBrain.cs" />
     <Compile Include="Assets/Scripts/Poker/Core/Cards.cs" />
     <Compile Include="Assets/Scripts/Poker/View/PokerUi.cs" />
     <Compile Include="Assets/Scripts/Poker/View/PokerArt.cs" />
+    <Compile Include="Assets/Scripts/Audio/AudioManager.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Assets/AssetsV1/SBS - 2D Poker Pack/License.txt" />

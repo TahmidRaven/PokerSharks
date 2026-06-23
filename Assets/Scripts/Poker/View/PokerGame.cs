@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 
 namespace Poker
@@ -71,10 +72,17 @@ namespace Poker
 
         // UI
         RectTransform _canvasRect;
-        Text _potText, _statusText, _foldLabel, _callLabel, _raiseLabel, _raiseValueText;
-        Button _foldBtn, _callBtn, _raiseBtn;
+        Text _potText, _statusText, _raiseValueText;
         Slider _raiseSlider;
-        GameObject _actionPanel;
+
+        // Action buttons authored in the scene under the "Buttons" node (world-space sprites).
+        Transform _buttonsNode;
+        SpriteRenderer _foldBtnSr, _callBtnSr, _raiseBtnSr;
+        Collider2D _foldCol, _callCol, _raiseCol;
+        Text _foldText, _callText, _raiseText;
+        bool _foldEnabled, _callEnabled, _raiseEnabled;
+        static readonly Color BtnOn = Color.white;
+        static readonly Color BtnOff = new Color(1f, 1f, 1f, 0.35f);
 
         readonly List<(RectTransform rt, Vector3 world)> _worldLabels = new List<(RectTransform, Vector3)>();
 
@@ -82,7 +90,6 @@ namespace Poker
         bool _awaitingHuman, _actionReady;
         PlayerAction _pending;
         LegalActions _currentLegal;
-        SeatPlayer _human;
 
         Vector3 _tableCenter = new Vector3(0f, 0.3f, 0f);
 
@@ -117,7 +124,15 @@ namespace Poker
             BuildTable();
             BuildEngine();
             BuildUI();
+            WireSceneButtons();
+            SetupAudio();
             StartCoroutine(RunGame());
+        }
+
+        void SetupAudio()
+        {
+            // Play background music from existing AudioManager nodes
+            AudioManager.instance.PlayAudio("BGM");
         }
 
         // ---------------- scene build ----------------
@@ -305,7 +320,6 @@ namespace Poker
                 _engine.Players.Add(p);
                 if (i != 0) _brains[i] = BotBrain.CreateRandom(_rng);
             }
-            _human = _engine.Players[0];
             _engine.ButtonIndex = NumPlayers - 1; // so first hand's button moves to seat 0
         }
 
@@ -324,26 +338,15 @@ namespace Poker
             _potText.fontStyle = FontStyle.Bold;
             _worldLabels.Add(((RectTransform)_potText.transform, _tableCenter + new Vector3(0f, 1.7f, 0f)));
 
-            // Action panel (bottom-right).
-            _actionPanel = PokerUi.NewRect(_canvasRect, "ActionPanel", new Vector2(680, -360), new Vector2(560, 240)).gameObject;
-            var panelRt = (RectTransform)_actionPanel.transform;
-
-            _raiseValueText = PokerUi.Label(panelRt, "RaiseValue", new Vector2(70, 78), new Vector2(360, 40),
+            // Raise-amount slider + readout. The FOLD / CALL_CHECK / BET_RAISE buttons themselves
+            // are the sprites authored in the scene (wired up in WireSceneButtons); this slider just
+            // lets the player pick how much to raise. It's repositioned above the buttons each frame.
+            _raiseValueText = PokerUi.Label(_canvasRect, "RaiseValue", Vector2.zero, new Vector2(360, 40),
                 28, TextAnchor.MiddleCenter, new Color(1f, 0.9f, 0.55f));
-            _raiseSlider = PokerUi.HSlider(panelRt, new Vector2(70, 36), new Vector2(360, 22));
+            _raiseSlider = PokerUi.HSlider(_canvasRect, Vector2.zero, new Vector2(360, 22));
             _raiseSlider.onValueChanged.AddListener(_ => UpdateRaiseValueText());
-
-            _foldBtn = PokerUi.Btn(panelRt, "Fold", new Vector2(-110, -50), new Vector2(150, 76),
-                "FOLD", new Color(0.70f, 0.23f, 0.23f), out _foldLabel);
-            _callBtn = PokerUi.Btn(panelRt, "Call", new Vector2(60, -50), new Vector2(150, 76),
-                "CALL", new Color(0.18f, 0.55f, 0.30f), out _callLabel);
-            _raiseBtn = PokerUi.Btn(panelRt, "Raise", new Vector2(230, -50), new Vector2(150, 76),
-                "RAISE", new Color(0.78f, 0.56f, 0.16f), out _raiseLabel);
-
-            _foldBtn.onClick.AddListener(OnFoldClicked);
-            _callBtn.onClick.AddListener(OnCallClicked);
-            _raiseBtn.onClick.AddListener(OnRaiseClicked);
-            _actionPanel.SetActive(false);
+            _raiseSlider.gameObject.SetActive(false);
+            _raiseValueText.gameObject.SetActive(false);
 
             // Per-seat info + bet labels (positioned over the world each frame).
             foreach (var s in _seats)
@@ -373,6 +376,170 @@ namespace Poker
         {
             if (_raiseValueText != null && _raiseSlider != null)
                 _raiseValueText.text = $"Raise to  ${(int)_raiseSlider.value}";
+        }
+
+        // ---------------- scene action buttons ----------------
+
+        // The Buttons node ships inactive (so GameObject.Find can't see it). Locate it, switch it on,
+        // give each sprite a click collider, and start with everything dimmed until it's the human's turn.
+        void WireSceneButtons()
+        {
+            var node = FindInScene("Buttons");
+            if (node == null)
+            {
+                Debug.LogError("[PokerGame] No 'Buttons' node in the scene — using keyboard (F/C/R) only.");
+                return;
+            }
+            _buttonsNode = node.transform;
+            _buttonsNode.gameObject.SetActive(true); // activate when the game starts
+
+            _foldBtnSr = SetupButton("FOLD", out _foldCol);
+            _callBtnSr = SetupButton("CALL_CHECK", out _callCol);
+            _raiseBtnSr = SetupButton("BET_RAISE", out _raiseCol);
+
+            // The sprites carry no text, so overlay a label centered on each (tracked in LateUpdate).
+            _foldText = MakeButtonLabel(_foldBtnSr, "FOLD");
+            _callText = MakeButtonLabel(_callBtnSr, "CALL");
+            _raiseText = MakeButtonLabel(_raiseBtnSr, "RAISE");
+
+            // Float the raise slider + readout just above the BET_RAISE button (tracked in LateUpdate).
+            if (_raiseBtnSr != null)
+            {
+                Vector3 anchor = _raiseBtnSr.transform.position;
+                _worldLabels.Add(((RectTransform)_raiseSlider.transform, anchor + new Vector3(0f, 1.05f, 0f)));
+                _worldLabels.Add(((RectTransform)_raiseValueText.transform, anchor + new Vector3(0f, 1.5f, 0f)));
+            }
+
+            HideControls();
+        }
+
+        // Find a named button under the Buttons node, add a click collider, and lift it above the table.
+        SpriteRenderer SetupButton(string name, out Collider2D col)
+        {
+            col = null;
+            Transform t = null;
+            foreach (var child in _buttonsNode.GetComponentsInChildren<Transform>(true))
+                if (child.name == name) { t = child; break; }
+            if (t == null)
+            {
+                Debug.LogWarning($"[PokerGame] Button '{name}' not found under the Buttons node.");
+                return null;
+            }
+            var sr = t.GetComponent<SpriteRenderer>();
+            if (sr != null) sr.sortingOrder = 20; // keep buttons above the felt and avatars
+            col = t.GetComponent<Collider2D>();
+            if (col == null) col = t.gameObject.AddComponent<BoxCollider2D>(); // auto-fits the sprite bounds
+            return sr;
+        }
+
+        // A canvas text label centered over a world-space button sprite.
+        Text MakeButtonLabel(SpriteRenderer btn, string initial)
+        {
+            if (btn == null) return null;
+            var label = PokerUi.Label(_canvasRect, btn.name + "Text", Vector2.zero, new Vector2(320, 90),
+                34, TextAnchor.MiddleCenter, Color.white);
+            label.fontStyle = FontStyle.Bold;
+            label.text = initial;
+            _worldLabels.Add(((RectTransform)label.transform, btn.transform.position));
+            return label;
+        }
+
+        // Depth-first scene search that also returns inactive objects (unlike GameObject.Find).
+        static GameObject FindInScene(string name)
+        {
+            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+                foreach (var t in root.GetComponentsInChildren<Transform>(true))
+                    if (t.name == name) return t.gameObject;
+            return null;
+        }
+
+        void Update()
+        {
+            if (!_awaitingHuman) return;
+
+            // Click the world-space sprite buttons.
+            var mouse = Mouse.current;
+            if (mouse != null && mouse.leftButton.wasPressedThisFrame && _cam != null)
+            {
+                Vector3 w = _cam.ScreenToWorldPoint(mouse.position.ReadValue());
+                var p = new Vector2(w.x, w.y);
+                if (_foldEnabled && _foldCol != null && _foldCol.OverlapPoint(p)) OnFoldClicked();
+                else if (_callEnabled && _callCol != null && _callCol.OverlapPoint(p)) OnCallClicked();
+                else if (_raiseEnabled && _raiseCol != null && _raiseCol.OverlapPoint(p)) OnRaiseClicked();
+            }
+
+            // Keyboard shortcuts (also the fallback if the buttons are missing).
+            var kb = Keyboard.current;
+            if (kb != null)
+            {
+                if (_foldEnabled && kb.fKey.wasPressedThisFrame) OnFoldClicked();
+                else if (_callEnabled && kb.cKey.wasPressedThisFrame) OnCallClicked();
+                else if (_raiseEnabled && kb.rKey.wasPressedThisFrame) OnRaiseClicked();
+            }
+        }
+
+        // Light up the buttons for the human's turn and set the raise slider's range.
+        void ConfigureControls(LegalActions legal)
+        {
+            _foldEnabled = true;   // you can always fold or call/check on your turn
+            _callEnabled = true;
+            _raiseEnabled = legal.CanRaise;
+
+            if (_foldBtnSr != null) _foldBtnSr.color = BtnOn;
+            if (_callBtnSr != null) _callBtnSr.color = BtnOn;
+            if (_raiseBtnSr != null) _raiseBtnSr.color = legal.CanRaise ? BtnOn : BtnOff;
+
+            // Button labels reflect the live action.
+            SetButtonText(_foldText, "FOLD", true);
+
+            int myChips = _engine.Players[0].Chips;
+            string callText = legal.CanCheck ? "CHECK"
+                            : legal.ToCall >= myChips ? $"CALL ${legal.ToCall}\n(ALL IN)"
+                            : $"CALL ${legal.ToCall}";
+            SetButtonText(_callText, callText, true);
+
+            string raiseText = !legal.CanRaise ? "RAISE"
+                             : legal.MinRaiseTo >= legal.MaxRaiseTo ? "ALL IN"
+                             : legal.CanCheck ? "BET" : "RAISE";
+            SetButtonText(_raiseText, raiseText, legal.CanRaise);
+
+            bool sliderUsable = legal.CanRaise && legal.MinRaiseTo < legal.MaxRaiseTo;
+            _raiseSlider.gameObject.SetActive(sliderUsable);
+            _raiseValueText.gameObject.SetActive(legal.CanRaise);
+
+            if (legal.CanRaise)
+            {
+                _raiseSlider.minValue = legal.MinRaiseTo;
+                _raiseSlider.maxValue = legal.MaxRaiseTo;
+                _raiseSlider.value = legal.MinRaiseTo;
+                if (sliderUsable) UpdateRaiseValueText();
+                else _raiseValueText.text = $"All in  ${legal.MaxRaiseTo}"; // only the all-in raise is left
+            }
+            else
+            {
+                _raiseValueText.text = "";
+            }
+        }
+
+        // Dim the buttons and hide the slider when it isn't the human's turn.
+        void HideControls()
+        {
+            _foldEnabled = _callEnabled = _raiseEnabled = false;
+            if (_foldBtnSr != null) _foldBtnSr.color = BtnOff;
+            if (_callBtnSr != null) _callBtnSr.color = BtnOff;
+            if (_raiseBtnSr != null) _raiseBtnSr.color = BtnOff;
+            SetButtonText(_foldText, "FOLD", false);
+            SetButtonText(_callText, "CALL", false);
+            SetButtonText(_raiseText, "RAISE", false);
+            if (_raiseSlider != null) _raiseSlider.gameObject.SetActive(false);
+            if (_raiseValueText != null) _raiseValueText.gameObject.SetActive(false);
+        }
+
+        static void SetButtonText(Text label, string text, bool enabled)
+        {
+            if (label == null) return;
+            label.text = text;
+            label.color = enabled ? BtnOn : BtnOff;
         }
 
         void OnFoldClicked() { if (_awaitingHuman) { _pending = PlayerAction.Fold(); _actionReady = true; } }
@@ -477,55 +644,14 @@ namespace Poker
         IEnumerator GetHumanAction()
         {
             _currentLegal = _engine.GetLegalActions();
-            ConfigureActionPanel(_currentLegal);
-            _actionPanel.SetActive(true);
+            ConfigureControls(_currentLegal);
             _actionReady = false;
             _awaitingHuman = true;
-            SetStatus("Your move");
+            SetStatus(_currentLegal.CanCheck ? "Your move" : $"Your move — ${_currentLegal.ToCall} to call");
             yield return new WaitUntil(() => _actionReady);
             _awaitingHuman = false;
-            _actionPanel.SetActive(false);
+            HideControls();
             SetStatus("");
-        }
-
-        void ConfigureActionPanel(LegalActions legal)
-        {
-            _foldBtn.interactable = true;
-            _callBtn.interactable = true;
-
-            if (legal.CanCheck)
-                _callLabel.text = "CHECK";
-            else if (legal.ToCall >= _human.Chips)
-                _callLabel.text = $"CALL ${legal.ToCall}\n(ALL IN)";
-            else
-                _callLabel.text = $"CALL ${legal.ToCall}";
-
-            if (legal.CanRaise)
-            {
-                bool allInOnly = legal.MinRaiseTo >= legal.MaxRaiseTo;
-                _raiseBtn.interactable = true;
-                _raiseSlider.gameObject.SetActive(!allInOnly);
-                _raiseSlider.minValue = legal.MinRaiseTo;
-                _raiseSlider.maxValue = legal.MaxRaiseTo;
-                _raiseSlider.value = legal.MinRaiseTo;
-                if (allInOnly)
-                {
-                    _raiseLabel.text = "ALL IN";
-                    _raiseValueText.text = $"All in  ${legal.MaxRaiseTo}";
-                }
-                else
-                {
-                    _raiseLabel.text = (legal.CanCheck) ? "BET" : "RAISE";
-                    UpdateRaiseValueText();
-                }
-            }
-            else
-            {
-                _raiseBtn.interactable = false;
-                _raiseSlider.gameObject.SetActive(false);
-                _raiseLabel.text = "RAISE";
-                _raiseValueText.text = "";
-            }
         }
 
         // ---------------- showdown ----------------
@@ -591,6 +717,7 @@ namespace Poker
 
         IEnumerator DealHoleCards()
         {
+            AudioManager.instance.PlayAudio("ShuffleRiffle");
             for (int k = 0; k < 2; k++)
             {
                 foreach (var s in _seats)
@@ -609,6 +736,7 @@ namespace Poker
 
                     // …then slide out to the seat's hole spot (world pos expressed local to the seat).
                     StartCoroutine(cv.MoveTo(parent.InverseTransformPoint(s.HolePos[k]), 0.16f));
+                    AudioManager.instance.PlayAudio("TakingCards");
                     yield return new WaitForSeconds(0.06f);
                 }
             }
@@ -626,6 +754,7 @@ namespace Poker
                 cv.transform.localScale = Vector3.one * 0.74f;
                 cv.transform.localPosition = new Vector3((i - 2) * 0.74f, 0f, 0f); // laid out across the DealerCards node
                 _board.Add(cv);
+                AudioManager.instance.PlayAudio("CardsPlacing");
                 yield return cv.FlipTo(true, 0.16f);
                 yield return new WaitForSeconds(0.05f);
             }
@@ -678,6 +807,14 @@ namespace Poker
                 _ => ""
             };
             _seats[p.Seat].ActionText = verb;
+
+            // Play appropriate audio for the action
+            if (p.IsAllIn)
+                AudioManager.instance.PlayAudio("All_in");
+            else if (action.Type == ActionType.Raise || action.Type == ActionType.Call)
+                AudioManager.instance.PlayAudio("ChipsPlacing");
+            else if (action.Type == ActionType.Fold)
+                AudioManager.instance.PlayAudio("CardsPound");
 
             // Dim a folded player's cards.
             if (p.Folded)

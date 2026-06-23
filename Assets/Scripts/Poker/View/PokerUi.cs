@@ -17,7 +17,13 @@ namespace Poker
             {
                 if (_font == null)
                 {
-                    _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                    // Project font: Space Grotesk (Assets/Resources/Fonts/SpaceGrotesk.ttf).
+                    _font = Resources.Load<Font>("Fonts/SpaceGrotesk");
+                    if (_font == null)
+                    {
+                        Debug.LogWarning("[PokerUi] SpaceGrotesk font not found in Resources/Fonts — falling back.");
+                        _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                    }
                     if (_font == null)
                         _font = Font.CreateDynamicFontFromOSFont(
                             new[] { "Arial", "Helvetica", "Liberation Sans", "DejaVu Sans" }, 16);
@@ -88,7 +94,22 @@ namespace Poker
             t.verticalOverflow = VerticalWrapMode.Overflow;
             t.raycastTarget = false;
             t.supportRichText = true;
+            ApplyTextEffect(t);
             return t;
+        }
+
+        // A dark shadowed outline so text stays legible over the felt, cards and chips.
+        public static void ApplyTextEffect(Graphic g)
+        {
+            var outline = g.gameObject.AddComponent<Outline>();
+            outline.effectColor = new Color(0f, 0f, 0f, 0.9f);
+            outline.effectDistance = new Vector2(1.6f, -1.6f);
+            outline.useGraphicAlpha = true;
+
+            var shadow = g.gameObject.AddComponent<Shadow>();
+            shadow.effectColor = new Color(0f, 0f, 0f, 0.55f);
+            shadow.effectDistance = new Vector2(2.5f, -2.5f);
+            shadow.useGraphicAlpha = true;
         }
 
         public static Button Btn(Transform parent, string name, Vector2 pos, Vector2 size,
