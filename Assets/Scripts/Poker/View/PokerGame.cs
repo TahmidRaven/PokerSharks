@@ -100,6 +100,9 @@ namespace Poker
         int _humanChipsAtHandStart;     // human stack at the top of the hand, to tell win from loss
         static Material _fxMaterial;     // URP-safe particle material shared by the effects
 
+        bool _paused;                   // pause menu open
+        GameObject _pauseOverlay;       // the in-game pause overlay instance
+
         // UI
         RectTransform _canvasRect;
         Text _potText, _statusText, _raiseValueText;
@@ -155,6 +158,7 @@ namespace Poker
             BuildEngine();
             BuildUI();
             WireSceneButtons();
+            WireCrossButton();
             SetupAudio();
             StartCoroutine(RunGame());
         }
@@ -390,6 +394,22 @@ namespace Poker
                 if (i != 0) _brains[i] = BotBrain.CreateRandom(_rng);
             }
             _engine.ButtonIndex = NumPlayers - 1; // so first hand's button moves to seat 0
+
+            // Continue: restore the previous session's stacks (New Game cleared the save).
+            if (GameSession.ResumeRequested && GameSession.TryLoad(out var savedChips, out int savedButton))
+            {
+                for (int i = 0; i < NumPlayers && i < savedChips.Length; i++)
+                    _engine.Players[i].Chips = savedChips[i];
+                _engine.ButtonIndex = savedButton;
+            }
+            GameSession.ResumeRequested = false;
+        }
+
+        void SaveSession()
+        {
+            var chips = new int[_engine.Players.Count];
+            for (int i = 0; i < chips.Length; i++) chips[i] = _engine.Players[i].Chips;
+            GameSession.Save(chips, _engine.ButtonIndex);
         }
 
         // ---------------- UI ----------------
@@ -522,8 +542,116 @@ namespace Poker
             return null;
         }
 
+        // ---------------- pause menu (CrossButton → glassmorphic overlay) ----------------
+
+        // Make the authored CrossButton open the pause menu. It polls input itself, so it works
+        // any time (during bot turns too) and while paused.
+        void WireCrossButton()
+        {
+            var cross = FindInScene("CrossButton");
+            if (cross == null) { Debug.LogWarning("[PokerGame] No 'CrossButton' node in the scene."); return; }
+            var sr = cross.GetComponent<SpriteRenderer>();
+            if (sr != null) sr.sortingOrder = 25; // above the table, below the pause overlay
+            var btn = cross.GetComponent<SpriteButton>();
+            if (btn == null) btn = cross.AddComponent<SpriteButton>();
+            btn.Init(_cam, sr != null ? sr.sprite : null, null, OpenPauseMenu);
+        }
+
+        void OpenPauseMenu()
+        {
+            if (_paused) return;
+            _paused = true;
+            Time.timeScale = 0f;       // freezes the WaitForSeconds-driven hand loop
+            // The HUD is a ScreenSpaceOverlay canvas, which always draws over world sprites — hide it
+            // so the pause overlay is the front-most thing on screen.
+            if (_canvasRect != null) _canvasRect.gameObject.SetActive(false);
+            BuildPauseOverlay();
+        }
+
+        // Continue: resume the in-progress game exactly where it paused.
+        void ResumeGame()
+        {
+            _paused = false;
+            Time.timeScale = 1f;
+            if (_canvasRect != null) _canvasRect.gameObject.SetActive(true);
+            if (_pauseOverlay != null) Destroy(_pauseOverlay);
+            _pauseOverlay = null;
+        }
+
+        void OverlayNewGame()
+        {
+            GameSession.StartNew();
+            Time.timeScale = 1f;
+            SceneManager.LoadScene("game");
+        }
+
+        void BuildPauseOverlay()
+        {
+            _pauseOverlay = new GameObject("PauseOverlay");
+
+            // Spawn at the "Start_PauseNode" anchor if it exists (drop that empty node below BG and
+            // move it to control where the menu appears); otherwise centre on the camera. We use its
+            // position only (not its parent/scale) so a scaled BG parent can't distort the menu.
+            var anchor = FindInScene("Start_PauseNode");
+            Vector3 c = anchor != null ? anchor.transform.position
+                      : (_cam != null ? _cam.transform.position : Vector3.zero);
+            c.z = 0f;
+            _pauseOverlay.transform.position = c;
+
+            // Full-screen frosted dim so the paused table shows through (glassmorphic).
+            if (_cam != null)
+            {
+                float h = _cam.orthographicSize * 2f, w = h * _cam.aspect;
+                var scrim = MakeOverlaySprite("Scrim", MenuArt.Scrim(), c, new Color(0.02f, 0.03f, 0.05f, 0.5f), 100);
+                scrim.transform.localScale = new Vector3(w * 1.3f, h * 1.3f, 1f);
+            }
+
+            // Three stacked buttons with their pressed-sprite swaps.
+            var defs = new (string normal, string pressed, Action act)[]
+            {
+                ("newgame",  "newgame_pressed",  OverlayNewGame),
+                ("continue", "continue_pressed", ResumeGame),
+                ("quit",     "quit_pressed",     MenuController.QuitApp),
+            };
+            const float gap = 1.7f;
+            float startY = c.y + gap;
+            Bounds? bounds = null;
+            for (int i = 0; i < defs.Length; i++)
+            {
+                var normal = MenuArt.LoadButton(defs[i].normal);
+                var sr = MakeOverlaySprite("Btn_" + defs[i].normal, normal,
+                                           new Vector3(c.x, startY - i * gap, 0f), Color.white, 102);
+                var btn = sr.gameObject.AddComponent<SpriteButton>();
+                btn.Init(_cam, normal, MenuArt.LoadButton(defs[i].pressed), defs[i].act);
+                bounds = bounds == null ? sr.bounds : Grow(bounds.Value, sr.bounds);
+            }
+
+            // Frosted rounded panel sized to the buttons.
+            if (bounds != null)
+            {
+                var panel = MakeOverlaySprite("Panel", MenuArt.Panel(), bounds.Value.center, Color.white, 101);
+                panel.drawMode = SpriteDrawMode.Sliced;
+                panel.size = new Vector2(bounds.Value.size.x + 1.1f, bounds.Value.size.y + 1.0f);
+            }
+        }
+
+        SpriteRenderer MakeOverlaySprite(string name, Sprite sprite, Vector3 pos, Color color, int order)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(_pauseOverlay.transform, false);
+            go.transform.position = new Vector3(pos.x, pos.y, 0f);
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = sprite;
+            sr.color = color;
+            sr.sortingOrder = order;
+            return sr;
+        }
+
+        static Bounds Grow(Bounds a, Bounds b) { a.Encapsulate(b); return a; }
+
         void Update()
         {
+            if (_paused) return;       // pause overlay handles its own (SpriteButton) clicks
             if (!_awaitingHuman) return;
 
             // Click the world-space sprite buttons.
@@ -641,6 +769,7 @@ namespace Poker
                     yield return new WaitForSeconds(1.6f);
                 }
                 yield return PlayHand();
+                SaveSession();
                 yield return new WaitForSeconds(1.5f);
             }
         }
