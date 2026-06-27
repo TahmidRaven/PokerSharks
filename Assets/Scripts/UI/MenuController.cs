@@ -7,8 +7,8 @@ namespace Poker
 {
     /// <summary>
     /// Drives the main-menu scene: makes the authored New Game / Continue / Quit sprites clickable
-    /// (with a pressed-sprite swap) and draws a glassmorphic panel behind them. Auto-spawned when
-    /// the "Menu" scene is the active scene, so no scene wiring is required.
+    /// (with a pressed-sprite swap) and drops the whole menu in from the top with a bounce by
+    /// animating the BG node they're parented under. Auto-spawned when the "Menu" scene is active.
     /// </summary>
     public sealed class MenuController : MonoBehaviour
     {
@@ -28,17 +28,21 @@ namespace Poker
         {
             Time.timeScale = 1f; // in case we returned here after a pause
             _cam = Camera.main != null ? Camera.main : FindFirstObjectByType<Camera>();
+            if (_cam != null)
+            {
+                _cam.clearFlags = CameraClearFlags.SolidColor;
+                _cam.backgroundColor = new Color(0.03f, 0.04f, 0.06f, 1f); // shows while the BG drops in
+            }
 
-            var newGame  = FindButton("New Game");
-            var cont     = FindButton("Continue");
-            var quit     = FindButton("Quit");
-
-            BuildBackground();
-            BuildBackdrop(new[] { newGame, cont, quit });
+            var newGame = FindButton("New Game");
+            var cont    = FindButton("Continue");
+            var quit    = FindButton("Quit");
 
             Wire(newGame, "newgame_pressed", OnNewGame);
             Wire(cont,    "continue_pressed", OnContinue);
             Wire(quit,    "quit_pressed",  OnQuit);
+
+            DropMenu(newGame, cont, quit);
         }
 
         // --- actions ---
@@ -59,81 +63,47 @@ namespace Poker
 
         public static void QuitApp()
         {
-#if UNITY_EDITOR
+#if UNITY_WEBGL && !UNITY_EDITOR
+            CloseGameWindow();           // close the browser tab/window (see Plugins/WebGL/CloseWindow.jslib)
+#elif UNITY_EDITOR
             UnityEditor.EditorApplication.isPlaying = false;
 #else
             Application.Quit();
 #endif
         }
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+        [System.Runtime.InteropServices.DllImport("__Internal")]
+        static extern void CloseGameWindow();
+#endif
+
         // --- setup helpers ---
 
         void Wire(SpriteRenderer sr, string pressedResource, Action onClick)
         {
             if (sr == null) return;
-            sr.sortingOrder = 52; // above the backdrop
             var btn = sr.gameObject.AddComponent<SpriteButton>();
             btn.Init(_cam, sr.sprite, MenuArt.LoadButton(pressedResource), onClick);
         }
 
-        // Show the real game background behind the menu instead of the flat default-blue camera clear.
-        void BuildBackground()
+        // The menu scene has no background of its own, so reuse the game's table BG (static), then
+        // drop the MenuPanel (the buttons' parent) in from above with a bounce — buttons ride along.
+        void DropMenu(params SpriteRenderer[] buttons)
         {
-            if (_cam == null) return;
-            _cam.clearFlags = CameraClearFlags.SolidColor;
-            _cam.backgroundColor = new Color(0.03f, 0.04f, 0.06f, 1f); // dark fallback behind the BG
+            float dropHeight = _cam != null ? _cam.orthographicSize * 3f : 16f; // clear the screen height
 
-            var bg = MenuArt.LoadButton("PokerTable"); // Resources/Menu/PokerTable
-            if (bg == null) return;
+            MenuArt.CoverBackground(_cam, -10); // static table backdrop, behind the panel
 
-            var sr = MakeSprite("MenuBG", bg, _cam.transform.position.x, _cam.transform.position.y, Color.white, 40);
-            float viewH = _cam.orthographicSize * 2f, viewW = viewH * _cam.aspect;
-            Vector2 size = bg.bounds.size;
-            if (size.x > 0.001f && size.y > 0.001f)
-            {
-                float scale = Mathf.Max(viewW / size.x, viewH / size.y) * 1.02f; // cover the view
-                sr.transform.localScale = new Vector3(scale, scale, 1f);
-            }
-        }
+            Transform menuPanel = null;
+            foreach (var b in buttons)
+                if (b != null && b.transform.parent != null) { menuPanel = b.transform.parent; break; }
 
-        // Frosted panel sized to the buttons, plus a light full-screen scrim behind it.
-        void BuildBackdrop(SpriteRenderer[] buttons)
-        {
-            Bounds? b = null;
-            foreach (var sr in buttons)
-            {
-                if (sr == null) continue;
-                if (b == null) b = sr.bounds;
-                else { var bb = b.Value; bb.Encapsulate(sr.bounds); b = bb; }
-            }
-            Vector3 center = b?.center ?? (_cam != null ? _cam.transform.position : Vector3.zero);
-            center.z = 0f;
+            var items = new List<(Transform, Vector3)>();
+            if (menuPanel != null) items.Add((menuPanel, menuPanel.position));
+            else foreach (var b in buttons) if (b != null) items.Add((b.transform, b.transform.position));
+            if (items.Count == 0) return;
 
-            if (_cam != null)
-            {
-                float h = _cam.orthographicSize * 2f, w = h * _cam.aspect;
-                var scrim = MakeSprite("MenuScrim", MenuArt.Scrim(), _cam.transform.position.x, _cam.transform.position.y,
-                                       new Color(0.02f, 0.03f, 0.05f, 0.25f), 50);
-                scrim.transform.localScale = new Vector3(w * 1.3f, h * 1.3f, 1f);
-            }
-
-            if (b != null)
-            {
-                var panel = MakeSprite("MenuPanel", MenuArt.Panel(), center.x, center.y, Color.white, 51);
-                panel.drawMode = SpriteDrawMode.Sliced;
-                panel.size = new Vector2(b.Value.size.x + 1.1f, b.Value.size.y + 1.0f);
-            }
-        }
-
-        static SpriteRenderer MakeSprite(string name, Sprite sprite, float x, float y, Color color, int order)
-        {
-            var go = new GameObject(name);
-            go.transform.position = new Vector3(x, y, 0f);
-            var sr = go.AddComponent<SpriteRenderer>();
-            sr.sprite = sprite;
-            sr.color = color;
-            sr.sortingOrder = order;
-            return sr;
+            StartCoroutine(MenuArt.DropGroup(items, dropHeight, 0.85f, false));
         }
 
         static SpriteRenderer FindButton(string name)

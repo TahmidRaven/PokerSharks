@@ -102,6 +102,7 @@ namespace Poker
 
         bool _paused;                   // pause menu open
         GameObject _pauseOverlay;       // the in-game pause overlay instance
+        const float MenuPanelScale = 1.5f; // matches the authored MenuPanel node's scale
 
         // juice
         Vector3 _camBasePos;            // camera rest position (shake returns here)
@@ -632,57 +633,53 @@ namespace Poker
                       : (_cam != null ? _cam.transform.position : Vector3.zero);
             c.z = 0f;
             _pauseOverlay.transform.position = c;
+            _pauseOverlay.transform.localScale = Vector3.one * MenuPanelScale; // inherit the menu's panel scale
 
-            // Full-screen frosted dim so the paused table shows through (glassmorphic).
-            if (_cam != null)
-            {
-                float h = _cam.orthographicSize * 2f, w = h * _cam.aspect;
-                var scrim = MakeOverlaySprite("Scrim", MenuArt.Scrim(), c, new Color(0.02f, 0.03f, 0.05f, 0.5f), 100);
-                scrim.transform.localScale = new Vector3(w * 1.3f, h * 1.3f, 1f);
-            }
+            // No background here — the live (frozen) game is the backdrop. Build the MenuPanel: panel
+            // art at the centre plus the three buttons (LOCAL positions, so they scale with the panel).
+            var panelSprite = MenuArt.LoadButton("MenuPanel"); // Resources/Menu/MenuPanel
+            if (panelSprite != null)
+                MakeOverlaySprite("MenuPanel", panelSprite, Vector3.zero, Color.white, 101);
 
-            // Three stacked buttons with their pressed-sprite swaps.
             var defs = new (string normal, string pressed, Action act)[]
             {
                 ("newgame",  "newgame_pressed",  OverlayNewGame),
                 ("continue", "continue_pressed", ResumeGame),
                 ("quit",     "quit_pressed",     MenuController.QuitApp),
             };
-            const float gap = 1.7f;
-            float startY = c.y + gap;
-            Bounds? bounds = null;
+            // Local layout copied from the authored MenuPanel children — y offsets and the 2/3 child
+            // scale (1.5 panel × 0.667 = native) — so the pause panel matches the menu exactly.
+            float[] localY = { 1.2866668f, 0.10666667f, -1.12f }; // New Game / Continue / Quit
+            const float childScale = 0.6666667f;
             for (int i = 0; i < defs.Length; i++)
             {
                 var normal = MenuArt.LoadButton(defs[i].normal);
                 var sr = MakeOverlaySprite("Btn_" + defs[i].normal, normal,
-                                           new Vector3(c.x, startY - i * gap, 0f), Color.white, 102);
+                                           new Vector3(0f, localY[i], 0f), Color.white, 102);
+                sr.transform.localScale = Vector3.one * childScale;
                 var btn = sr.gameObject.AddComponent<SpriteButton>();
                 btn.Init(_cam, normal, MenuArt.LoadButton(defs[i].pressed), defs[i].act);
-                bounds = bounds == null ? sr.bounds : Grow(bounds.Value, sr.bounds);
+                if (defs[i].normal == "continue")
+                    sr.gameObject.AddComponent<Breathe>(); // a game is in progress — nudge "Continue"
             }
 
-            // Frosted rounded panel sized to the buttons.
-            if (bounds != null)
-            {
-                var panel = MakeOverlaySprite("Panel", MenuArt.Panel(), bounds.Value.center, Color.white, 101);
-                panel.drawMode = SpriteDrawMode.Sliced;
-                panel.size = new Vector2(bounds.Value.size.x + 1.1f, bounds.Value.size.y + 1.0f);
-            }
+            // Drop the whole panel in from above (children ride along, scaled). Unscaled (game paused).
+            float drop = _cam != null ? _cam.orthographicSize * 3f : 16f;
+            var items = new List<(Transform, Vector3)> { (_pauseOverlay.transform, c) };
+            StartCoroutine(MenuArt.DropGroup(items, drop, 0.7f, true));
         }
 
-        SpriteRenderer MakeOverlaySprite(string name, Sprite sprite, Vector3 pos, Color color, int order)
+        SpriteRenderer MakeOverlaySprite(string name, Sprite sprite, Vector3 localPos, Color color, int order)
         {
             var go = new GameObject(name);
             go.transform.SetParent(_pauseOverlay.transform, false);
-            go.transform.position = new Vector3(pos.x, pos.y, 0f);
+            go.transform.localPosition = new Vector3(localPos.x, localPos.y, 0f);
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = sprite;
             sr.color = color;
             sr.sortingOrder = order;
             return sr;
         }
-
-        static Bounds Grow(Bounds a, Bounds b) { a.Encapsulate(b); return a; }
 
         void Update()
         {

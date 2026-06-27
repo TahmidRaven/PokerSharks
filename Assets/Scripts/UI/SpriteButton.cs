@@ -20,7 +20,6 @@ namespace Poker
         SpriteRenderer _sr;
         Collider2D _col;
         Camera _cam;
-        bool _held;
 
         public void Init(Camera cam, Sprite normal, Sprite pressed, Action onClick)
         {
@@ -38,21 +37,13 @@ namespace Poker
         {
             var m = Mouse.current;
             if (m == null || _cam == null || _col == null) return;
+            if (!m.leftButton.wasPressedThisFrame) return; // single press, fires on press-down
 
             Vector3 w = _cam.ScreenToWorldPoint(m.position.ReadValue());
-            bool over = _col.OverlapPoint(new Vector2(w.x, w.y));
-
-            if (m.leftButton.wasPressedThisFrame && over)
+            if (_col.OverlapPoint(new Vector2(w.x, w.y)))
             {
-                _held = true;
-                if (Pressed != null) _sr.sprite = Pressed;
-            }
-            else if (m.leftButton.wasReleasedThisFrame)
-            {
-                bool fire = _held && over;
-                _held = false;
-                if (Normal != null) _sr.sprite = Normal;
-                if (fire) OnClick?.Invoke();
+                if (Pressed != null) _sr.sprite = Pressed; // swap to the pressed art immediately
+                OnClick?.Invoke();                          // then do what it needs to do
             }
         }
     }

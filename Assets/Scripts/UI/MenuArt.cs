@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Poker
@@ -14,6 +16,42 @@ namespace Poker
             var all = Resources.LoadAll<Sprite>("Menu/" + name);
             if (all != null && all.Length > 0) return all[0];
             return Resources.Load<Sprite>("Menu/" + name);
+        }
+
+        static Material _spriteMat;
+
+        // An unlit sprite material so backgrounds render correctly even in a scene with no 2D light
+        // (a Lit material with no light shows up black).
+        public static Material SpriteMaterial()
+        {
+            if (_spriteMat == null) _spriteMat = new Material(Shader.Find("Sprites/Default"));
+            return _spriteMat;
+        }
+
+        // A full-screen, cover-scaled copy of the game's table background (Resources/Menu/PokerTable),
+        // rendered unlit. Used as the menu / pause-screen backdrop. Returns its SpriteRenderer.
+        public static SpriteRenderer CoverBackground(Camera cam, int sortingOrder)
+        {
+            if (cam == null) return null;
+            var sprite = LoadButton("PokerTable");
+            if (sprite == null) return null;
+
+            var go = new GameObject("TableBG");
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = sprite;
+            sr.sharedMaterial = SpriteMaterial();
+            sr.color = Color.white;
+            sr.sortingOrder = sortingOrder;
+            go.transform.position = new Vector3(cam.transform.position.x, cam.transform.position.y, 0f);
+
+            float viewH = cam.orthographicSize * 2f, viewW = viewH * cam.aspect;
+            Vector2 sz = sprite.bounds.size;
+            if (sz.x > 0.001f && sz.y > 0.001f)
+            {
+                float s = Mathf.Max(viewW / sz.x, viewH / sz.y) * 1.02f; // uniform cover, no distortion
+                go.transform.localScale = new Vector3(s, s, 1f);
+            }
+            return sr;
         }
 
         static Sprite _panel, _scrim;
@@ -55,6 +93,36 @@ namespace Poker
             tex.Apply();
             _scrim = Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f), 1f);
             return _scrim;
+        }
+
+        // Classic bouncing-ball ease (0..1) for drop-in animations.
+        public static float EaseOutBounce(float x)
+        {
+            const float n1 = 7.5625f, d1 = 2.75f;
+            if (x < 1f / d1) return n1 * x * x;
+            if (x < 2f / d1) { x -= 1.5f / d1;  return n1 * x * x + 0.75f; }
+            if (x < 2.5f / d1) { x -= 2.25f / d1; return n1 * x * x + 0.9375f; }
+            x -= 2.625f / d1; return n1 * x * x + 0.984375f;
+        }
+
+        // Drop a whole group of transforms in together from above, bouncing to their targets as one
+        // unit. Pass unscaled=true when the game is paused (Time.timeScale == 0).
+        public static IEnumerator DropGroup(IList<(Transform t, Vector3 target)> items,
+                                            float dropHeight, float dur, bool unscaled)
+        {
+            Vector3 up = Vector3.up * dropHeight;
+            foreach (var it in items) it.t.position = it.target + up;
+
+            float e = 0f;
+            while (e < dur)
+            {
+                e += unscaled ? Time.unscaledDeltaTime : Time.deltaTime;
+                float b = EaseOutBounce(Mathf.Clamp01(e / dur));
+                foreach (var it in items)
+                    it.t.position = Vector3.LerpUnclamped(it.target + up, it.target, b);
+                yield return null;
+            }
+            foreach (var it in items) it.t.position = it.target;
         }
 
         // Signed distance to a centred rounded box (negative inside), in pixels.

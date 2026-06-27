@@ -50,6 +50,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Assets/Scripts/UI/MenuArt.cs" />
+    <Compile Include="Assets/Scripts/UI/Breathe.cs" />
     <Compile Include="Assets/Scripts/UI/SpriteButton.cs" />
     <Compile Include="Assets/Scripts/Poker/View/CardView.cs" />
     <Compile Include="Assets/Scripts/Poker/Game/PokerEngine.cs" />
