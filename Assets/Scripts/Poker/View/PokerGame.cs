@@ -36,6 +36,14 @@ namespace Poker
         [Tooltip("Used only when Auto Center is off.")]
         [SerializeField] Vector2 tableCenter = new Vector2(0f, 0.3f);
 
+        [Header("Card sizes (on-screen scale, independent of the seat node's own scale)")]
+        [Tooltip("Your hole cards.")]
+        [SerializeField] float humanCardScale = 1.0f;
+        [Tooltip("A bot's face-down hole cards.")]
+        [SerializeField] float botCardScale = 0.5f;
+        [Tooltip("Size a bot's cards grow to when shown at showdown.")]
+        [SerializeField] float botRevealCardScale = 1.0f;
+
         sealed class SeatVisual
         {
             public int Seat;
@@ -227,13 +235,13 @@ namespace Poker
         void BuildSeats()
         {
             // Resolve the five seat transforms (index 0 = human "Me", 1..4 = bots P1..P4).
-            // Priority: Inspector reference → find-by-name in the scene → a generated fallback.
+            // Priority: Inspector reference → find-by-name (including nested nodes) → a generated fallback.
             var t = new Transform[NumPlayers];
-            t[0] = humanSeat != null ? humanSeat : FindOrCreate("Me", DefaultAnchors[0]);
+            t[0] = humanSeat != null ? humanSeat : FindOrCreate("Me", DefaultAnchors[0], "player0", "player");
             for (int i = 1; i < NumPlayers; i++)
             {
                 Transform assigned = (botSeats != null && i - 1 < botSeats.Length) ? botSeats[i - 1] : null;
-                t[i] = assigned != null ? assigned : FindOrCreate("P" + i, DefaultAnchors[i]);
+                t[i] = assigned != null ? assigned : FindOrCreate("P" + i, DefaultAnchors[i], "player" + i, "Player" + i);
             }
 
             // Table centre = where the pot / community cards sit.
@@ -267,7 +275,7 @@ namespace Poker
             if (human)
             {
                 s.FaceUp = true;
-                s.HoleScale = 1.0f;
+                s.HoleScale = humanCardScale;
                 Vector3 hc = s.Anchor + s.Dir * 1.15f;
                 s.HolePos[0] = hc - perp * 0.5f;
                 s.HolePos[1] = hc + perp * 0.5f;
@@ -281,27 +289,66 @@ namespace Poker
             else
             {
                 s.FaceUp = false;
-                s.HoleScale = 0.5f;
+                s.HoleScale = botCardScale;
                 Vector3 hc = s.Anchor + s.Dir * 0.85f;
                 s.HolePos[0] = hc - perp * 0.16f;
                 s.HolePos[1] = hc + perp * 0.16f;
                 s.InfoWorld = s.Anchor - s.Dir * 1.2f;
                 s.BetWorld = s.Anchor + s.Dir * 1.7f;
-                // When shown at showdown, grow to full size and spread apart so both read clearly.
-                s.RevealScale = 1.0f;
+                // When shown at showdown, grow and spread apart so both read clearly.
+                s.RevealScale = botRevealCardScale;
                 s.RevealPos[0] = hc - perp * 0.5f;
                 s.RevealPos[1] = hc + perp * 0.5f;
             }
             return s;
         }
 
-        static Transform FindOrCreate(string name, Vector3 fallback)
+        static Transform FindOrCreate(string name, Vector3 fallback, params string[] aliases)
         {
-            var go = GameObject.Find(name);
-            if (go != null) return go.transform;
+            var candidates = new List<string>();
+            if (!string.IsNullOrEmpty(name))
+            {
+                candidates.Add(name);
+                candidates.Add(name.ToLowerInvariant());
+                candidates.Add(name.ToUpperInvariant());
+            }
+            if (aliases != null)
+            {
+                foreach (var alias in aliases)
+                {
+                    if (string.IsNullOrEmpty(alias)) continue;
+                    if (!candidates.Contains(alias)) candidates.Add(alias);
+                    if (!candidates.Contains(alias.ToLowerInvariant())) candidates.Add(alias.ToLowerInvariant());
+                }
+            }
+
+            foreach (var candidate in candidates)
+            {
+                var found = FindSceneTransform(candidate);
+                if (found != null) return found;
+            }
+
             var created = new GameObject("Seat_" + name);
             created.transform.position = fallback;
             return created.transform;
+        }
+
+        static Transform FindSceneTransform(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            Transform fallback = null;
+            foreach (var root in SceneManager.GetActiveScene().GetRootGameObjects())
+            {
+                foreach (var child in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!child.name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+                    // When several nodes share a name (e.g. an empty "Me" group wrapping the
+                    // "Me" avatar) prefer the one carrying the avatar sprite, not the parent.
+                    if (child.GetComponent<SpriteRenderer>() != null) return child;
+                    fallback ??= child;
+                }
+            }
+            return fallback;
         }
 
         void BuildEngine()
@@ -706,7 +753,7 @@ namespace Poker
                     if (cv == null || cv.FaceUp) continue;
                     // Grow to full size, spread out, and lift above the table clutter, then flip up.
                     cv.SortingOrder = 8;
-                    cv.transform.localScale = Vector3.one * s.RevealScale;
+                    SetCardScale(cv.transform, parent, s.RevealScale);
                     StartCoroutine(cv.MoveTo(parent.InverseTransformPoint(s.RevealPos[k]), 0.12f));
                     yield return cv.FlipTo(true, 0.12f);
                 }
@@ -714,6 +761,16 @@ namespace Poker
         }
 
         // ---------------- card visuals ----------------
+
+        // Size a card to `worldScale` on screen, cancelling out any scale on its parent seat node
+        // so the avatar's own scale no longer shrinks/grows the cards hanging under it.
+        static void SetCardScale(Transform card, Transform parent, float worldScale)
+        {
+            Vector3 p = parent != null ? parent.lossyScale : Vector3.one;
+            float sx = Mathf.Abs(p.x) > 1e-4f ? worldScale / p.x : worldScale;
+            float sy = Mathf.Abs(p.y) > 1e-4f ? worldScale / p.y : worldScale;
+            card.localScale = new Vector3(sx, sy, 1f);
+        }
 
         IEnumerator DealHoleCards()
         {
@@ -729,7 +786,7 @@ namespace Poker
                     var parent = s.Avatar != null ? s.Avatar : _tableRoot;
                     var cv = CardView.Create(parent, _backSprite, s.FaceUp ? 7 : 6);
                     cv.SetFace(_art.Card(p.Hole[k]));
-                    cv.transform.localScale = Vector3.one * s.HoleScale;
+                    SetCardScale(cv.transform, parent, s.HoleScale);
                     cv.transform.position = _tableCenter;       // deal from the centre…
                     if (s.FaceUp) cv.ShowFace(true);
                     s.Hole[k] = cv;
