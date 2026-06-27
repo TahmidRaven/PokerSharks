@@ -20,7 +20,7 @@ namespace Poker
         const int SmallBlind = 5;
         const int BigBlind = 10;
 
-        static readonly string[] BotNames = { "You", "Jett", "Mira", "Cole", "Vega" };
+        static readonly string[] BotNames = { "You", "Midari", "Kirari", "Mary", "Ririka" };
 
         [Header("Scene wiring (optional — left empty, falls back to find-by-name then defaults)")]
         [Tooltip("Your human player node (the \"Me\" object).")]
