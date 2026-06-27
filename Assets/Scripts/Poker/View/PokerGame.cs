@@ -44,6 +44,24 @@ namespace Poker
         [Tooltip("Size a bot's cards grow to when shown at showdown.")]
         [SerializeField] float botRevealCardScale = 1.0f;
 
+        [Header("Win / lose effects")]
+        [Tooltip("Confetti prefab spawned when you win the pot. Loaded from Resources by default; " +
+                 "drop in your own prefab to override.")]
+        [SerializeField] GameObject winEffectPrefab;
+        [Tooltip("Burst prefab spawned when you lose the hand. Left empty, a burst is built from code.")]
+        [SerializeField] GameObject loseEffectPrefab;
+        [Tooltip("Scale of the win confetti.")]
+        [SerializeField] float winEffectScale = 1.0f;
+        [Tooltip("Scale of the lose burst.")]
+        [SerializeField] float loseEffectScale = 1.0f;
+        [Tooltip("Playback speed of the win effect (1 = the prefab's own speed, 2 = twice as fast).")]
+        [SerializeField] float winEffectSpeed = 1.0f;
+        [Tooltip("Playback speed of the lose effect (1 = the prefab's own speed, 2 = twice as fast).")]
+        [SerializeField] float loseEffectSpeed = 1.0f;
+
+        // Resources path to the confetti prefab imported from Confetti_Particle_Effect.unitypackage.
+        const string WinEffectResource = "Poker/Confetti_Particles_Sphere";
+
         sealed class SeatVisual
         {
             public int Seat;
@@ -77,6 +95,10 @@ namespace Poker
         readonly List<CardView> _board = new List<CardView>(5);
         Sprite _backSprite;
         System.Random _rng;
+
+        GameObject _activeEffect;       // win/lose VFX instance, cleared when the next hand starts
+        int _humanChipsAtHandStart;     // human stack at the top of the hand, to tell win from loss
+        static Material _fxMaterial;     // URP-safe particle material shared by the effects
 
         // UI
         RectTransform _canvasRect;
@@ -612,8 +634,9 @@ namespace Poker
             {
                 if (!_engine.CanStartHand)
                 {
+                    AudioManager.instance.PlayAudio("GameOver");
                     foreach (var p in _engine.Players) p.Chips = StartingChips;
-                    SetStatus("New game — everyone re-bought");
+                    SetStatus("Game over — everyone re-bought");
                     RefreshSeatInfo();
                     yield return new WaitForSeconds(1.6f);
                 }
@@ -625,6 +648,7 @@ namespace Poker
         IEnumerator PlayHand()
         {
             ClearTableVisuals();
+            _humanChipsAtHandStart = _engine.Players[0].Chips; // baseline to judge win vs loss
             _engine.StartHand();
             PlaceDealerButton();
             SetStatus("");
@@ -737,7 +761,163 @@ namespace Poker
 
             RefreshSeatInfo();
             RefreshPotAndBets();
+
+            // Celebrate or commiserate based on how the human's stack changed over the hand.
+            int delta = _engine.Players[0].Chips - _humanChipsAtHandStart;
+            Vector3 fxPos = _seats[0].Anchor;
+            if (delta > 0) { PlayWinEffect(fxPos); AudioManager.instance.PlayAudio("Win"); }
+            else if (delta < 0) { PlayLoseEffect(fxPos); AudioManager.instance.PlayAudio("Loose"); }
+
             yield return new WaitForSeconds(2.4f);
+        }
+
+        // ---------------- win / lose effects ----------------
+
+        // Confetti from Confetti_Particle_Effect.unitypackage, fired when you win the pot.
+        void PlayWinEffect(Vector3 pos)
+        {
+            var prefab = winEffectPrefab != null
+                ? winEffectPrefab
+                : Resources.Load<GameObject>(WinEffectResource);
+            if (prefab == null)
+            {
+                Debug.LogWarning($"[PokerGame] Win effect prefab not found (Resources/{WinEffectResource}).");
+                return;
+            }
+
+            ClearActiveEffect();
+            // Keep the prefab's authored orientation (the confetti sphere bursts in all directions).
+            var fx = Instantiate(prefab, pos, prefab.transform.rotation);
+            fx.transform.localScale = Vector3.one * Mathf.Max(0.01f, winEffectScale);
+            SetEffectSpeed(fx, winEffectSpeed);
+            MakeEffectRenderOnTop(fx);
+            PlayAllSystems(fx);
+            TrackEffect(fx, 11f);
+        }
+
+        // A code-built burst (no asset needed) fired when you lose the hand. A loseEffectPrefab,
+        // if assigned, is used instead.
+        void PlayLoseEffect(Vector3 pos)
+        {
+            ClearActiveEffect();
+
+            if (loseEffectPrefab != null)
+            {
+                var fxp = Instantiate(loseEffectPrefab, pos, loseEffectPrefab.transform.rotation);
+                fxp.transform.localScale = Vector3.one * Mathf.Max(0.01f, loseEffectScale);
+                SetEffectSpeed(fxp, loseEffectSpeed);
+                MakeEffectRenderOnTop(fxp);
+                PlayAllSystems(fxp);
+                TrackEffect(fxp, 4f);
+                return;
+            }
+
+            var go = new GameObject("LoseBurst");
+            go.transform.position = pos;
+            go.transform.localScale = Vector3.one * Mathf.Max(0.01f, loseEffectScale);
+            var ps = go.AddComponent<ParticleSystem>();
+            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+
+            var main = ps.main;
+            main.playOnAwake = false;
+            main.loop = false;
+            main.simulationSpeed = Mathf.Max(0f, loseEffectSpeed);
+            main.duration = 1.0f;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.7f, 1.3f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(2.5f, 6.0f);
+            main.startSize = new ParticleSystem.MinMaxCurve(0.12f, 0.34f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
+            main.gravityModifier = 0.8f;
+            main.maxParticles = 300;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            // Muted reds / greys read as "loss".
+            main.startColor = new ParticleSystem.MinMaxGradient(
+                new Color(0.62f, 0.10f, 0.10f), new Color(0.35f, 0.35f, 0.38f));
+
+            var emission = ps.emission;
+            emission.rateOverTime = 0f;
+            emission.SetBursts(new[] { new ParticleSystem.Burst(0f, (short)70) });
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Sphere;
+            shape.radius = 0.2f;
+
+            var r = ps.GetComponent<ParticleSystemRenderer>();
+            r.renderMode = ParticleSystemRenderMode.Billboard;
+            r.material = EffectMaterial();
+            r.sortingOrder = 60;
+
+            ps.Play();
+            TrackEffect(go, 3.5f);
+        }
+
+        // Lift every particle system in a spawned effect above the table sprites, and only swap in a
+        // URP-safe material where the existing one would render magenta (the imported confetti ships
+        // with built-in/legacy particle materials). Prefabs already built for URP keep their materials.
+        static void MakeEffectRenderOnTop(GameObject fx)
+        {
+            foreach (var r in fx.GetComponentsInChildren<ParticleSystemRenderer>(true))
+            {
+                r.sortingOrder = 60;
+                // Mesh-mode particles using the built-in "Plane" mesh lie in the XZ plane, so they're
+                // edge-on to this top-down 2D camera and show as odd slivers. Billboard them so the
+                // confetti pieces face the camera. (Quad-mesh effects already face us — left alone.)
+                if (r.renderMode == ParticleSystemRenderMode.Mesh && r.mesh != null && r.mesh.name == "Plane")
+                    r.renderMode = ParticleSystemRenderMode.Billboard;
+                if (NeedsUrpFix(r.sharedMaterial)) r.material = EffectMaterial();
+                if (r.trailMaterial != null && NeedsUrpFix(r.trailMaterial)) r.trailMaterial = EffectMaterial();
+            }
+        }
+
+        // True for built-in / legacy particle materials (magenta under URP), false for URP-ready ones.
+        static bool NeedsUrpFix(Material m)
+        {
+            if (m == null || m.shader == null) return true;
+            string n = m.shader.name;
+            return n.StartsWith("Particles/")                // built-in particle shaders
+                || n.StartsWith("Legacy Shaders/Particles/") // legacy particle shaders
+                || n == "Hidden/InternalErrorShader";        // already failed to resolve
+        }
+
+        static void PlayAllSystems(GameObject fx)
+        {
+            foreach (var ps in fx.GetComponentsInChildren<ParticleSystem>(true))
+                ps.Play();
+        }
+
+        // Scale every particle system in the effect by `multiplier` (1 = the prefab's own speed),
+        // so sub-emitters keep their relative timing while the whole effect speeds up or slows down.
+        static void SetEffectSpeed(GameObject fx, float multiplier)
+        {
+            float m = Mathf.Max(0f, multiplier);
+            foreach (var ps in fx.GetComponentsInChildren<ParticleSystem>(true))
+            {
+                var main = ps.main;
+                main.simulationSpeed *= m;
+            }
+        }
+
+        static Material EffectMaterial()
+        {
+            if (_fxMaterial == null)
+            {
+                var sh = Shader.Find("Sprites/Default"); // unlit, vertex-colored, works under URP 2D
+                _fxMaterial = new Material(sh) { name = "PokerEffect (runtime)" };
+            }
+            return _fxMaterial;
+        }
+
+        void TrackEffect(GameObject fx, float life)
+        {
+            _activeEffect = fx;
+            Destroy(fx, life);
+        }
+
+        void ClearActiveEffect()
+        {
+            if (_activeEffect != null) Destroy(_activeEffect);
+            _activeEffect = null;
         }
 
         IEnumerator RevealActiveHoles()
@@ -829,6 +1009,7 @@ namespace Poker
             foreach (var cv in _board) if (cv != null) Destroy(cv.gameObject);
             _board.Clear();
             ShowPotChips(0);
+            ClearActiveEffect();
         }
 
         void PlaceDealerButton()
