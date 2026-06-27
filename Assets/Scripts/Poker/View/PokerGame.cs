@@ -103,6 +103,13 @@ namespace Poker
         bool _paused;                   // pause menu open
         GameObject _pauseOverlay;       // the in-game pause overlay instance
 
+        // juice
+        Vector3 _camBasePos;            // camera rest position (shake returns here)
+        Coroutine _shakeCo;
+        float _shownPot;                // animated pot readout (counts up to the real pot)
+        int _actingSeat = -1;
+        SpriteRenderer _actingGlow;     // pulsing spotlight under the acting player
+
         // UI
         RectTransform _canvasRect;
         Text _potText, _statusText, _raiseValueText;
@@ -185,6 +192,7 @@ namespace Poker
             _cam.orthographicSize = 5.7f;
             _cam.clearFlags = CameraClearFlags.SolidColor;
             _cam.backgroundColor = new Color(0.05f, 0.16f, 0.10f, 1f);
+            _camBasePos = _cam.transform.position;
         }
 
         void BuildTable()
@@ -216,6 +224,16 @@ namespace Poker
             _dealerDisc.sprite = PokerUi.MakeDiscSprite();
             _dealerDisc.sortingOrder = 4;
             _dealerDisc.enabled = false;
+
+            // Soft pulsing spotlight that sits under whoever is acting (positioned in HighlightActing).
+            var glow = new GameObject("ActingGlow");
+            glow.transform.SetParent(_tableRoot, false);
+            glow.transform.localScale = Vector3.one * 1.8f;
+            _actingGlow = glow.AddComponent<SpriteRenderer>();
+            _actingGlow.sprite = PokerUi.MakeDiscSprite();
+            _actingGlow.color = new Color(1f, 0.85f, 0.2f, 0f);
+            _actingGlow.sortingOrder = 2; // above the background, below the cards
+            _actingGlow.enabled = false;
         }
 
         // Find a scene node by name (creating it if absent) to use as a parent/anchor.
@@ -458,6 +476,23 @@ namespace Poker
                 Vector3 sp = _cam.WorldToScreenPoint(world);
                 if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, sp, null, out var local))
                     rt.anchoredPosition = local;
+            }
+
+            // Pot counts up toward the real value instead of snapping.
+            if (_potText != null && _engine != null)
+            {
+                int target = _engine.Pot;
+                _shownPot = Mathf.MoveTowards(_shownPot, target, (Mathf.Abs(target - _shownPot) * 6f + 250f) * Time.deltaTime);
+                int shown = Mathf.RoundToInt(_shownPot);
+                _potText.text = shown > 0 ? $"POT  ${shown}" : "";
+            }
+
+            // Pulse the acting-player spotlight.
+            if (_actingGlow != null && _actingGlow.enabled)
+            {
+                float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 6f);
+                var c = _actingGlow.color; c.a = 0.16f + 0.20f * pulse; _actingGlow.color = c;
+                _actingGlow.transform.localScale = Vector3.one * (1.7f + 0.18f * pulse);
             }
         }
 
@@ -886,6 +921,19 @@ namespace Poker
                     msg += $"\n{hv.Describe()}";
                 if (totals.Count > 1) msg += "  (split)";
                 SetStatus(msg);
+
+                // Rake the pot to the winner, pop them, dim everyone else, and shake on a big pot.
+                var ws = _seats[primary.Seat];
+                Vector3 pot = _potChipsRoot != null ? _potChipsRoot.position : _tableCenter;
+                FlyChips(pot, ws.Anchor, Mathf.Clamp(2 + bestAmt / 50, 2, 7));
+                StartCoroutine(PopAvatar(ws.Avatar));
+                foreach (var s in _seats)
+                {
+                    var asr = s.Avatar != null ? s.Avatar.GetComponent<SpriteRenderer>() : null;
+                    if (asr != null) asr.color = s.Seat == primary.Seat ? Color.white : new Color(0.45f, 0.45f, 0.5f, 1f);
+                }
+                FloatText(ws.Anchor + Vector3.up * 0.6f, $"+${bestAmt}", new Color(0.5f, 1f, 0.55f));
+                Punch(Mathf.Clamp(bestAmt / 1500f, 0.12f, 0.5f), 0.4f);
             }
 
             RefreshSeatInfo();
@@ -895,9 +943,119 @@ namespace Poker
             int delta = _engine.Players[0].Chips - _humanChipsAtHandStart;
             Vector3 fxPos = _seats[0].Anchor;
             if (delta > 0) { PlayWinEffect(fxPos); AudioManager.instance.PlayAudio("Win"); }
-            else if (delta < 0) { PlayLoseEffect(fxPos); AudioManager.instance.PlayAudio("Loose"); }
+            else if (delta < 0)
+            {
+                PlayLoseEffect(fxPos);
+                AudioManager.instance.PlayAudio("Loose");
+                FloatText(_seats[0].Anchor + Vector3.up * 0.6f, $"-${-delta}", new Color(1f, 0.45f, 0.45f));
+            }
 
             yield return new WaitForSeconds(2.4f);
+        }
+
+        // ---------------- juice (game feel) ----------------
+
+        // Quick camera shake that decays back to the rest position.
+        void Punch(float amp, float dur)
+        {
+            if (_cam == null) return;
+            if (_shakeCo != null) StopCoroutine(_shakeCo);
+            _shakeCo = StartCoroutine(ShakeRoutine(amp, dur));
+        }
+
+        IEnumerator ShakeRoutine(float amp, float dur)
+        {
+            float t = 0f;
+            while (t < dur)
+            {
+                t += Time.deltaTime;
+                float k = 1f - Mathf.Clamp01(t / dur);
+                float dx = (UnityEngine.Random.value * 2f - 1f) * amp * k;
+                float dy = (UnityEngine.Random.value * 2f - 1f) * amp * k;
+                _cam.transform.position = _camBasePos + new Vector3(dx, dy, 0f);
+                yield return null;
+            }
+            _cam.transform.position = _camBasePos;
+            _shakeCo = null;
+        }
+
+        // Fling a few chip sprites from one spot to another (player→pot, or pot→winner).
+        void FlyChips(Vector3 from, Vector3 to, int count)
+        {
+            count = Mathf.Clamp(count, 1, 7);
+            int[] cols = { 1, 3, 2, 5, 4, 6 };
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 j = new Vector3((UnityEngine.Random.value - 0.5f) * 0.5f, (UnityEngine.Random.value - 0.5f) * 0.5f, 0f);
+                StartCoroutine(FlyChipRoutine(from + j, to + j, cols[i % cols.Length], i * 0.05f));
+            }
+        }
+
+        IEnumerator FlyChipRoutine(Vector3 from, Vector3 to, int colorIndex, float startDelay)
+        {
+            if (startDelay > 0f) yield return new WaitForSeconds(startDelay);
+            var go = new GameObject("FlyChip");
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = _art.Chip(colorIndex);
+            sr.sortingOrder = 30; // above the table, below the pause overlay
+            go.transform.position = from;
+            go.transform.localScale = Vector3.one * 0.45f;
+            float dur = 0.35f, t = 0f;
+            while (t < dur)
+            {
+                t += Time.deltaTime;
+                float u = Mathf.Clamp01(t / dur);
+                Vector3 p = Vector3.Lerp(from, to, u);
+                p.y += Mathf.Sin(u * Mathf.PI) * 0.6f; // little arc
+                go.transform.position = p;
+                yield return null;
+            }
+            Destroy(go);
+        }
+
+        // A "+$250" / "-$120" that pops, drifts up and fades over a world spot.
+        void FloatText(Vector3 world, string text, Color color)
+        {
+            if (_canvasRect == null || _cam == null) return;
+            StartCoroutine(FloatTextRoutine(world, text, color));
+        }
+
+        IEnumerator FloatTextRoutine(Vector3 world, string text, Color color)
+        {
+            var label = PokerUi.Label(_canvasRect, "Float", Vector2.zero, new Vector2(320, 80),
+                                      44, TextAnchor.MiddleCenter, color);
+            label.fontStyle = FontStyle.Bold;
+            label.text = text;
+            var rt = (RectTransform)label.transform;
+            Vector3 sp = _cam.WorldToScreenPoint(world);
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, sp, null, out var basePos);
+            float dur = 1.1f, t = 0f;
+            while (t < dur)
+            {
+                t += Time.deltaTime;
+                float u = Mathf.Clamp01(t / dur);
+                rt.anchoredPosition = basePos + new Vector2(0f, u * 90f);
+                rt.localScale = Vector3.one * (1f + 0.2f * Mathf.Sin(u * Mathf.PI));
+                var c = color; c.a = 1f - u; label.color = c;
+                yield return null;
+            }
+            Destroy(label.gameObject);
+        }
+
+        // A celebratory scale bounce on the winner's avatar.
+        IEnumerator PopAvatar(Transform avatar)
+        {
+            if (avatar == null) yield break;
+            Vector3 baseScale = avatar.localScale;
+            float dur = 0.4f, t = 0f;
+            while (t < dur)
+            {
+                t += Time.deltaTime;
+                float u = Mathf.Clamp01(t / dur);
+                avatar.localScale = baseScale * (1f + 0.25f * Mathf.Sin(u * Mathf.PI));
+                yield return null;
+            }
+            avatar.localScale = baseScale;
         }
 
         // ---------------- win / lose effects ----------------
@@ -1122,6 +1280,7 @@ namespace Poker
                 _board.Add(cv);
                 AudioManager.instance.PlayAudio("CardsPlacing");
                 yield return cv.FlipTo(true, 0.16f);
+                if (i >= 3) Punch(0.12f, 0.22f); // a little kick on the turn and river
                 yield return new WaitForSeconds(0.05f);
             }
         }
@@ -1139,6 +1298,16 @@ namespace Poker
             _board.Clear();
             ShowPotChips(0);
             ClearActiveEffect();
+
+            // Reset juice state for the new hand.
+            _shownPot = 0f;
+            _actingSeat = -1;
+            if (_actingGlow != null) _actingGlow.enabled = false;
+            foreach (var s in _seats)
+            {
+                var asr = s.Avatar != null ? s.Avatar.GetComponent<SpriteRenderer>() : null;
+                if (asr != null) asr.color = Color.white; // undo the showdown dim
+            }
         }
 
         void PlaceDealerButton()
@@ -1183,6 +1352,14 @@ namespace Poker
             else if (action.Type == ActionType.Fold)
                 AudioManager.instance.PlayAudio("CardsPound");
 
+            // Juice: fling chips toward the pot when betting, and shake hard on an all-in.
+            if (action.Type == ActionType.Call || action.Type == ActionType.Raise)
+            {
+                Vector3 pot = _potChipsRoot != null ? _potChipsRoot.position : _tableCenter;
+                FlyChips(_seats[p.Seat].BetWorld, pot, Mathf.Clamp(1 + p.StreetCommitted / 40, 1, 4));
+            }
+            if (p.IsAllIn) Punch(0.28f, 0.4f);
+
             // Dim a folded player's cards.
             if (p.Folded)
             {
@@ -1207,9 +1384,7 @@ namespace Poker
 
         void RefreshPotAndBets()
         {
-            int pot = _engine.Pot;
-            if (_potText != null) _potText.text = pot > 0 ? $"POT  ${pot}" : "";
-            ShowPotChips(pot);
+            ShowPotChips(_engine.Pot); // pot text counts up in LateUpdate
 
             foreach (var s in _seats)
             {
@@ -1220,6 +1395,17 @@ namespace Poker
 
         void HighlightActing(SeatPlayer acting)
         {
+            _actingSeat = acting != null ? acting.Seat : -1;
+            if (_actingGlow != null)
+            {
+                if (acting != null)
+                {
+                    _actingGlow.transform.position = _seats[acting.Seat].Anchor;
+                    _actingGlow.enabled = true;
+                }
+                else _actingGlow.enabled = false;
+            }
+
             foreach (var s in _seats)
             {
                 var p = _engine.Players[s.Seat];
