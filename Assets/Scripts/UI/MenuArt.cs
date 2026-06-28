@@ -33,7 +33,7 @@ namespace Poker
         public static SpriteRenderer CoverBackground(Camera cam, int sortingOrder)
         {
             if (cam == null) return null;
-            var sprite = LoadButton("PokerTable");
+            var sprite = LoadButton("MenuBG"); // a copy of the game scene's BG, kept in Resources
             if (sprite == null) return null;
 
             var go = new GameObject("TableBG");
