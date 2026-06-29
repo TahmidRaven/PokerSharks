@@ -113,7 +113,7 @@ namespace Poker
 
         // UI
         RectTransform _canvasRect;
-        Text _potText, _statusText, _raiseValueText;
+        Text _potText, _statusText, _turnText, _raiseValueText;
         Slider _raiseSlider;
 
         // Action buttons authored in the scene under the "Buttons" node (world-space sprites).
@@ -125,7 +125,13 @@ namespace Poker
         static readonly Color BtnOn = Color.white;
         static readonly Color BtnOff = new Color(1f, 1f, 1f, 0.35f);
 
-        readonly List<(RectTransform rt, Vector3 world)> _worldLabels = new List<(RectTransform, Vector3)>();
+        // Each HUD label tracks a world anchor (a movable scene node) plus a small offset, and is
+        // re-projected onto the screen-space canvas every frame. anchor == null → offset is absolute.
+        readonly List<(RectTransform rt, Transform anchor, Vector3 offset)> _worldLabels =
+            new List<(RectTransform, Transform, Vector3)>();
+
+        void AddWorldLabel(RectTransform rt, Transform anchor, Vector3 offset = default) =>
+            _worldLabels.Add((rt, anchor, offset));
 
         // human input state
         bool _awaitingHuman, _actionReady;
@@ -441,10 +447,27 @@ namespace Poker
                 52, TextAnchor.MiddleCenter, new Color(1f, 0.93f, 0.6f));
             _statusText.fontStyle = FontStyle.Bold;
 
+            _turnText = PokerUi.Label(_canvasRect, "TurnStatus", new Vector2(0, -250), new Vector2(1100, 60),
+                36, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.55f));
+            _turnText.fontStyle = FontStyle.Bold;
+            _turnText.text = "";
+            // The "Your move" prompt follows a movable TurnLabel anchor node (defaults below centre).
+            Vector3 turnDefault = (_cam != null ? _cam.transform.position : Vector3.zero) +
+                                  Vector3.down * (_cam != null ? _cam.orthographicSize : 5.7f) * 0.46f;
+            turnDefault.z = 0f;
+            AddWorldLabel((RectTransform)_turnText.transform, ResolveAnchor("TurnLabel", turnDefault));
+
             _potText = PokerUi.Label(_canvasRect, "Pot", new Vector2(0, 150), new Vector2(600, 60),
                 40, TextAnchor.MiddleCenter, Color.white);
             _potText.fontStyle = FontStyle.Bold;
-            _worldLabels.Add(((RectTransform)_potText.transform, _tableCenter + new Vector3(0f, 1.7f, 0f)));
+            // The pot readout and the per-seat info/bet labels follow named scene anchor nodes you can
+            // move in the editor (PotLabel, InfoLabel_Me/_P1.._P4, BetLabel_Me/_P1.._P4). Each is
+            // found-or-created and, while still sitting at the origin, auto-placed at the default below;
+            // nudge the node off the origin to pin the label wherever you like.
+            AddWorldLabel((RectTransform)_potText.transform,
+                
+
+                ResolveAnchor("PotLabel", _tableCenter + new Vector3(0f, 1.7f, 0f)));
 
             // Raise-amount slider + readout. The FOLD / CALL_CHECK / BET_RAISE buttons themselves
             // are the sprites authored in the scene (wired up in WireSceneButtons); this slider just
@@ -464,16 +487,19 @@ namespace Poker
                 s.Info.fontStyle = FontStyle.Bold;
                 s.Bet = PokerUi.Label(_canvasRect, "Bet" + s.Seat, Vector2.zero, new Vector2(180, 40),
                     26, TextAnchor.MiddleCenter, new Color(1f, 0.9f, 0.55f));
-                _worldLabels.Add(((RectTransform)s.Info.transform, s.InfoWorld));
-                _worldLabels.Add(((RectTransform)s.Bet.transform, s.BetWorld));
+                string tag = s.Seat == 0 ? "Me" : "P" + s.Seat; // matches the seat node names
+                AddWorldLabel((RectTransform)s.Info.transform, ResolveAnchor("InfoLabel_" + tag, s.InfoWorld));
+                AddWorldLabel((RectTransform)s.Bet.transform, ResolveAnchor("BetLabel_" + tag, s.BetWorld));
             }
         }
 
         void LateUpdate()
         {
             if (_cam == null || _canvasRect == null) return;
-            foreach (var (rt, world) in _worldLabels)
+            foreach (var (rt, anchor, offset) in _worldLabels)
             {
+                if (rt == null) continue;
+                Vector3 world = (anchor != null ? anchor.position : Vector3.zero) + offset;
                 Vector3 sp = _cam.WorldToScreenPoint(world);
                 if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, sp, null, out var local))
                     rt.anchoredPosition = local;
@@ -530,9 +556,9 @@ namespace Poker
             // Float the raise slider + readout just above the BET_RAISE button (tracked in LateUpdate).
             if (_raiseBtnSr != null)
             {
-                Vector3 anchor = _raiseBtnSr.transform.position;
-                _worldLabels.Add(((RectTransform)_raiseSlider.transform, anchor + new Vector3(0f, 1.05f, 0f)));
-                _worldLabels.Add(((RectTransform)_raiseValueText.transform, anchor + new Vector3(0f, 1.5f, 0f)));
+                // Float above the BET_RAISE button — move that button node and these ride along.
+                AddWorldLabel((RectTransform)_raiseSlider.transform, _raiseBtnSr.transform, new Vector3(0f, 1.05f, 0f));
+                AddWorldLabel((RectTransform)_raiseValueText.transform, _raiseBtnSr.transform, new Vector3(0f, 1.5f, 0f));
             }
 
             HideControls();
@@ -565,7 +591,7 @@ namespace Poker
                 34, TextAnchor.MiddleCenter, Color.white);
             label.fontStyle = FontStyle.Bold;
             label.text = initial;
-            _worldLabels.Add(((RectTransform)label.transform, btn.transform.position));
+            AddWorldLabel((RectTransform)label.transform, btn.transform); // rides the button sprite node
             return label;
         }
 
@@ -736,6 +762,8 @@ namespace Poker
             _raiseSlider.gameObject.SetActive(sliderUsable);
             _raiseValueText.gameObject.SetActive(legal.CanRaise);
 
+            SetTurnStatus(legal.CanCheck ? "Your move" : $"Your move — ${legal.ToCall} to call");
+
             if (legal.CanRaise)
             {
                 _raiseSlider.minValue = legal.MinRaiseTo;
@@ -762,6 +790,7 @@ namespace Poker
             SetButtonText(_raiseText, "RAISE", false);
             if (_raiseSlider != null) _raiseSlider.gameObject.SetActive(false);
             if (_raiseValueText != null) _raiseValueText.gameObject.SetActive(false);
+            SetTurnStatus("");
         }
 
         static void SetButtonText(Text label, string text, bool enabled)
@@ -879,7 +908,7 @@ namespace Poker
             ConfigureControls(_currentLegal);
             _actionReady = false;
             _awaitingHuman = true;
-            SetStatus(_currentLegal.CanCheck ? "Your move" : $"Your move — ${_currentLegal.ToCall} to call");
+            SetStatus("");
             yield return new WaitUntil(() => _actionReady);
             _awaitingHuman = false;
             HideControls();
@@ -1320,6 +1349,7 @@ namespace Poker
         // ---------------- labels ----------------
 
         void SetStatus(string text) { if (_statusText != null) _statusText.text = text; }
+        void SetTurnStatus(string text) { if (_turnText != null) _turnText.text = text; }
 
         string StreetName(Street st) => st switch
         {

@@ -249,7 +249,7 @@ Transform:
   m_GameObject: {fileID: 80720833}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: -1.12, z: 0}
+  m_LocalPosition: {x: 0, y: -1.6366668, z: 0}
   m_LocalScale: {x: 0.6666667, y: 0.6666667, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -385,7 +385,7 @@ Transform:
   m_GameObject: {fileID: 956401917}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 1.2866668, z: 0}
+  m_LocalPosition: {x: 0, y: 0.77, z: 0}
   m_LocalScale: {x: 0.6666667, y: 0.6666667, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -457,7 +457,7 @@ SpriteRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 0
   m_MaskInteraction: 0
-  m_Sprite: {fileID: -6744610437654617032, guid: bf218fefc41bf4cd9bf930969a468feb, type: 3}
+  m_Sprite: {fileID: 3668354517498064935, guid: 152946cc8834744329452ff90f362353, type: 3}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
   m_FlipX: 0
   m_FlipY: 0
@@ -477,7 +477,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0.27, z: 0}
-  m_LocalScale: {x: 1.5, y: 1.5, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 956401920}
@@ -615,7 +615,7 @@ Transform:
   m_GameObject: {fileID: 1787361824}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0.10666667, z: 0}
+  m_LocalPosition: {x: 0, y: -0.4100001, z: 0}
   m_LocalScale: {x: 0.6666667, y: 0.6666667, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -632,6 +632,7 @@ GameObject:
   - component: {fileID: 2069293459}
   - component: {fileID: 2069293458}
   - component: {fileID: 2069293457}
+  - component: {fileID: 2069293460}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -713,6 +714,50 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &2069293460
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2069293456}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a79441f348de89743a2939f4d699eac1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Unity.RenderPipelines.Universal.Runtime::UnityEngine.Rendering.Universal.UniversalAdditionalCameraData
+  m_RenderShadows: 1
+  m_RequiresDepthTextureOption: 2
+  m_RequiresOpaqueTextureOption: 2
+  m_CameraType: 0
+  m_Cameras: []
+  m_RendererIndex: -1
+  m_VolumeLayerMask:
+    serializedVersion: 2
+    m_Bits: 1
+  m_VolumeTrigger: {fileID: 0}
+  m_VolumeFrameworkUpdateModeOption: 2
+  m_RenderPostProcessing: 0
+  m_Antialiasing: 0
+  m_AntialiasingQuality: 2
+  m_StopNaN: 0
+  m_Dithering: 0
+  m_ClearDepth: 1
+  m_AllowXRRendering: 1
+  m_AllowHDROutput: 1
+  m_UseScreenCoordOverride: 0
+  m_ScreenSizeOverride: {x: 0, y: 0, z: 0, w: 0}
+  m_ScreenCoordScaleBias: {x: 0, y: 0, z: 0, w: 0}
+  m_RequiresDepthTexture: 0
+  m_RequiresColorTexture: 0
+  m_TaaSettings:
+    m_Quality: 3
+    m_FrameInfluence: 0.1
+    m_JitterScale: 1
+    m_MipBias: 0
+    m_VarianceClampScale: 0.9
+    m_ContrastAdaptiveSharpening: 0
+  m_Version: 2
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
