@@ -1855,9 +1855,9 @@ MonoBehaviour:
   botCardScale: 0.75
   botRevealCardScale: 1
   winEffectPrefab: {fileID: 0}
-  loseEffectPrefab: {fileID: 4716100389982693565, guid: b2ce523ade1946a4dae8b42d0f438795, type: 3}
+  loseEffectPrefab: {fileID: 2433282508537954060, guid: 3ef3ae421f71c5c4e97fe12dc2fc6312, type: 3}
   winEffectScale: 1
-  loseEffectScale: 1
+  loseEffectScale: 3
   winEffectSpeed: 1
   loseEffectSpeed: 0.5
 --- !u!4 &911682840
